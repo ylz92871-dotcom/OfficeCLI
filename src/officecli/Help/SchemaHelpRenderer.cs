@@ -316,6 +316,83 @@ internal static class SchemaHelpRenderer
         return trimmed.Substring(0, lastSlash);
     }
 
+    /// <summary>
+    /// Render a single property as a focused drill-down page: the 4th level of
+    /// `help &lt;format&gt; [verb] &lt;element&gt; &lt;property&gt;`. Returns true and fills
+    /// <paramref name="rendered"/> when the property (or one of its aliases /
+    /// propAliases) exists on the element's schema; returns false otherwise so
+    /// the caller can emit an "unknown property" error with a valid-props list.
+    /// In JSON mode the property object itself is emitted (indented), mirroring
+    /// RenderJson on the element level.
+    /// </summary>
+    internal static bool TryRenderPropertyPage(JsonDocument doc, string? verbFilter, string property, bool json, out string rendered)
+    {
+        rendered = "";
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("properties", out var props)
+            || props.ValueKind != JsonValueKind.Object)
+            return false;
+
+        JsonProperty? match = null;
+        foreach (var prop in props.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, property, StringComparison.OrdinalIgnoreCase))
+            { match = prop; break; }
+            if (PropertyMatchesAlias(prop.Value, property))
+            { match = prop; break; }
+        }
+        if (match == null) return false;
+
+        if (json)
+        {
+            using var ms = new System.IO.MemoryStream();
+            using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+                match.Value.Value.WriteTo(writer);
+            rendered = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            return true;
+        }
+
+        var format = root.TryGetProperty("format", out var f) ? f.GetString() ?? "" : "";
+        var element = root.TryGetProperty("element", out var e) ? e.GetString() ?? "" : "";
+        var isContainer = root.TryGetProperty("container", out var c)
+                          && c.ValueKind == JsonValueKind.True;
+        var header = verbFilter == null
+            ? $"{format} {element} / {match.Value.Name}"
+            : $"{format} {verbFilter} {element} / {match.Value.Name}";
+        var sb = new StringBuilder();
+        sb.AppendLine(header);
+        sb.AppendLine(new string('-', Math.Max(16, header.Length)));
+        RenderProperty(sb, match.Value, isContainer);
+        rendered = sb.ToString().TrimEnd('\r', '\n');
+        return true;
+    }
+
+    private static bool PropertyMatchesAlias(JsonElement body, string property)
+    {
+        foreach (var key in new[] { "aliases", "propAliases" })
+        {
+            if (!body.TryGetProperty(key, out var aliases)) continue;
+            if (aliases.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var al in aliases.EnumerateArray())
+                {
+                    if (al.ValueKind == JsonValueKind.String
+                        && string.Equals(al.GetString(), property, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            else if (aliases.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var al in aliases.EnumerateObject())
+                {
+                    if (string.Equals(al.Name, property, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static void RenderProperty(StringBuilder sb, JsonProperty prop, bool isContainer)
     {
         var name = prop.Name;

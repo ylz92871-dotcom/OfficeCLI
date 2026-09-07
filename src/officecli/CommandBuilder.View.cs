@@ -9,6 +9,63 @@ namespace OfficeCli;
 
 static partial class CommandBuilder
 {
+    /// <summary>Only emit per-render progress for decks larger than this many
+    /// slides; small decks are fast enough that the lines are just noise.</summary>
+    private const int ProgressThreshold = 50;
+
+    /// <summary>Progress lines go to stderr so --json stdout stays parseable.
+    /// Mirrors the existing <c>[pages]</c> diagnostics stream.</summary>
+    private static void EmitProgress(string message)
+        => Console.Error.WriteLine($"[progress] {message}");
+
+    /// <summary>
+    /// Built-in PDF fallback used when no exporter plugin is installed: render
+    /// the same HTML preview a `view html` produces, then print it to PDF via
+    /// headless Chrome (<see cref="OfficeCli.Core.HtmlScreenshot.CapturePdf"/>).
+    /// This makes <c>view pdf</c> usable out of the box on .pptx/.docx/.xlsx
+    /// instead of failing with "No exporter plugin found".
+    /// </summary>
+    private static OfficeCli.Core.Plugins.ExporterInvoker.ExportResult RenderPdfViaHtml(string srcPath, string pdfPath)
+    {
+        string? html = null;
+        using (var handler = DocumentHandlerFactory.Open(srcPath))
+        {
+            try
+            {
+                var fmt = Path.GetExtension(srcPath).TrimStart('.').ToLowerInvariant();
+                html = RenderViaRegistry(handler, fmt, new OfficeCli.Core.Rendering.RenderOptions());
+            }
+            catch
+            {
+                html = null; // proxy / unsupported — surface the friendly error below
+            }
+        }
+        if (html == null)
+            throw new OfficeCli.Core.CliException(
+                "No exporter plugin found and the built-in HTML→PDF fallback cannot render this file type.")
+            {
+                Code = "exporter_not_found",
+                Suggestion = "Install an exporter plugin, or use a .pptx, .docx, or .xlsx file."
+            };
+
+        var tmpHtml = Path.Combine(Path.GetTempPath(),
+            $"officecli_pdf_{Path.GetFileNameWithoutExtension(srcPath)}_{Guid.NewGuid():N}.html");
+        try
+        {
+            File.WriteAllText(tmpHtml, html);
+            if (!OfficeCli.Core.HtmlScreenshot.CapturePdf(tmpHtml, pdfPath))
+                throw new OfficeCli.Core.CliException(
+                    "No exporter plugin found and no headless Chrome/Edge/Chromium is available for the built-in PDF fallback.")
+                {
+                    Code = "exporter_not_found",
+                    Suggestion = "Install an exporter plugin, or install Chrome/Edge/Chromium for the built-in fallback."
+                };
+        }
+        finally { try { File.Delete(tmpHtml); } catch { } }
+
+        return new OfficeCli.Core.Plugins.ExporterInvoker.ExportResult(pdfPath, null!, false);
+    }
+
     private static Command BuildViewCommand(Option<bool> jsonOption)
     {
         var viewFileArg = new Argument<FileInfo>("file") { Description = "Office document path (.docx, .xlsx, .pptx)" };
@@ -89,7 +146,32 @@ static partial class CommandBuilder
             if (mode.ToLowerInvariant() is "pdf")
             {
                 var pdfPath = outArg ?? Path.ChangeExtension(file.FullName, "pdf");
-                var exp = OfficeCli.Core.Plugins.ExporterInvoker.Run(file.FullName, ".pdf", pdfPath);
+                // Built-in fallback: when no exporter plugin is installed
+                // (exporter_not_found), render the normal HTML preview and print
+                // it to PDF via headless Chrome, so `view pdf` works out of the
+                // box instead of erroring with "No exporter plugin found".
+                OfficeCli.Core.Plugins.ExporterInvoker.ExportResult exp;
+                try
+                {
+                    exp = OfficeCli.Core.Plugins.ExporterInvoker.Run(file.FullName, ".pdf", pdfPath);
+                }
+                catch (OfficeCli.Core.CliException ex) when (ex.Code == "exporter_not_found")
+                {
+                    // No plugin: the built-in HTML→PDF fallback opens the file
+                    // itself, so release a warm resident's exclusive lock first
+                    // (close flushes pending edits, mirroring what
+                    // ExporterInvoker does for the plugin path) — otherwise
+                    // `view pdf` mid-session fails with an io_error file lock
+                    // and PDF looks "unusable" despite the fallback existing.
+                    bool residentClosed = false;
+                    if (ResidentClient.TryConnect(file.FullName, out _))
+                    {
+                        if (ResidentClient.SendCloseWithResponse(file.FullName, out _))
+                            residentClosed = true;
+                    }
+                    var fallback = RenderPdfViaHtml(file.FullName, pdfPath);
+                    exp = fallback with { ResidentClosed = residentClosed };
+                }
                 if (json)
                 {
                     Console.WriteLine(OutputFormatter.WrapEnvelopeText(exp.OutputPath));
@@ -150,6 +232,8 @@ static partial class CommandBuilder
                     // silently rendered all slides. Honor --page with strict
                     // range checking, matching SVG mode's CONSISTENCY(strict-page).
                     var (pStart, pEnd) = ParsePptHtmlPage(pageFilter, start, end, pptHandler);
+                    if (pptHandler.GetSlideCount() > ProgressThreshold)
+                        EmitProgress($"Rendering slide range {pStart}–{pEnd} of {pptHandler.GetSlideCount()}…");
                     html = RenderViaRegistry(handler, "pptx",
                         new OfficeCli.Core.Rendering.RenderOptions { StartPage = pStart, EndPage = pEnd });
                 }
@@ -175,7 +259,7 @@ static partial class CommandBuilder
                         // and overwrite an arbitrary victim file with preview HTML. It
                         // also caused collisions between concurrent `view html`
                         // invocations of the same file.
-                        var htmlPath = outArg ?? Path.Combine(Path.GetTempPath(), $"officecli_preview_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.html");
+                        var htmlPath = OfficeCli.Core.OutputPaths.ArtifactPath(outArg, file.FullName, "preview", ".html");
                         File.WriteAllText(htmlPath, html);
                         Console.WriteLine(Path.GetFullPath(htmlPath));
                         if (browser)
@@ -443,7 +527,7 @@ static partial class CommandBuilder
                     };
                 }
 
-                var pngPath = outArg ?? Path.Combine(Path.GetTempPath(), $"officecli_screenshot_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.png");
+                var pngPath = OfficeCli.Core.OutputPaths.ArtifactPath(outArg, file.FullName, "screenshot", ".png");
                 if (directPng != null)
                 {
                     File.WriteAllBytes(pngPath, directPng);
@@ -477,7 +561,12 @@ static partial class CommandBuilder
                 }
                 Console.WriteLine(Path.GetFullPath(pngPath));
                 if (handler is OfficeCli.Handlers.PowerPointHandler pptCount)
-                    Console.Error.WriteLine($"[pages] total={pptCount.GetSlideCount()}");
+                {
+                    var slideTotal = pptCount.GetSlideCount();
+                    Console.Error.WriteLine($"[pages] total={slideTotal}");
+                    if (slideTotal > ProgressThreshold)
+                        EmitProgress($"Done ({slideTotal} slides)");
+                }
                 if (browser)
                 {
                     try
@@ -515,6 +604,8 @@ static partial class CommandBuilder
                     {
                         slideNum = start.Value;
                     }
+                    if (pptSvgHandler.GetSlideCount() > ProgressThreshold)
+                        EmitProgress($"Rendering slide {slideNum} of {pptSvgHandler.GetSlideCount()}…");
                     var svg = RenderViaRegistry(handler, "pptx",
                         new OfficeCli.Core.Rendering.RenderOptions
                         { Output = OfficeCli.Core.Rendering.RenderOutputKind.Svg, StartPage = slideNum })!;
@@ -529,14 +620,14 @@ static partial class CommandBuilder
                             // can't pre-plant a symlink at it and have WriteAllText
                             // clobber a victim file (CWE-59) — matches the sibling
                             // preview/screenshot temp writers in this file.
-                            outPath = Path.Combine(Path.GetTempPath(), $"officecli_slide{slideNum}_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.html");
+                            outPath = Path.Combine(OfficeCli.Core.OutputPaths.ResolveDefaultOutputDir(file.FullName), $"officecli_slide{slideNum}_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.html");
                             // CONSISTENCY(katex-mirror): mirror-first with CDN fallback — see Core/KatexAssets.
                             var html = $"<!DOCTYPE html><html><head><meta charset='UTF-8'><link rel='stylesheet' href='{OfficeCli.Core.KatexAssets.CssUrl}' onerror=\"{OfficeCli.Core.KatexAssets.CssOnErrorJs}\"><script defer src='{OfficeCli.Core.KatexAssets.JsUrl}' onerror=\"{OfficeCli.Core.KatexAssets.JsOnErrorJs("")}\"></script><style>body{{margin:0;display:flex;justify-content:center;background:#f0f0f0}}</style></head><body>{svg}<script>window.addEventListener('load',function(){{document.querySelectorAll('[data-formula]').forEach(function(el){{try{{katex.render(el.getAttribute('data-formula'),el,{{throwOnError:false,displayMode:true}})}}catch(e){{}}}})}})</script></body></html>";
                             File.WriteAllText(outPath, html);
                         }
                         else
                         {
-                            outPath = Path.Combine(Path.GetTempPath(), $"officecli_slide{slideNum}_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.svg");
+                            outPath = Path.Combine(OfficeCli.Core.OutputPaths.ResolveDefaultOutputDir(file.FullName), $"officecli_slide{slideNum}_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.svg");
                             File.WriteAllText(outPath, svg);
                         }
                         Console.WriteLine(outPath);
@@ -565,8 +656,8 @@ static partial class CommandBuilder
                         { Code = "unsupported_type" };
                     if (browser)
                     {
-                        var outPath = Path.Combine(Path.GetTempPath(),
-                            $"officecli_preview_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.svg");
+                        var outPath = Path.Combine(OfficeCli.Core.OutputPaths.ResolveDefaultOutputDir(file.FullName),
+    $"officecli_preview_{Path.GetFileNameWithoutExtension(file.Name)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.svg");
                         File.WriteAllText(outPath, svg);
                         Console.WriteLine(outPath);
                         try

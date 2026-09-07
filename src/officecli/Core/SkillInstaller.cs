@@ -54,6 +54,7 @@ internal static class SkillInstaller
         ["data-dashboard"]  = "officecli-data-dashboard",
         ["financial-model"] = "officecli-financial-model",
         ["word-form"]       = "officecli-word-form",
+        ["docx-design"]     = "officecli-docx-design",
     };
 
     // One-line trigger per skill — a compact, always-on discovery lure injected
@@ -75,6 +76,7 @@ internal static class SkillInstaller
         ["academic-paper"]  = "academic papers / research reports",
         ["data-dashboard"]  = "data dashboards",
         ["financial-model"] = "financial models / projections",
+        ["docx-design"]     = "designed handouts / magazine or manual layout, callout cards, color-bands",
     };
 
     /// <summary>

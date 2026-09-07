@@ -1123,6 +1123,11 @@ public class ResidentServer : IDisposable
                 ExecuteMove(request);
                 NotifyWatchSlideChanged(request.GetArg("path"));
                 break;
+            case "layout":
+                PromoteToEditable();
+                ExecuteLayout(request);
+                NotifyWatchSlideChanged(request.GetArg("path"));
+                break;
             case "swap":
                 PromoteToEditable();
                 ExecuteSwap(request);
@@ -1238,6 +1243,8 @@ public class ResidentServer : IDisposable
 
         var bestEffort = request.GetArg("bestEffort", "false")
             .Equals("true", StringComparison.OrdinalIgnoreCase);
+        var dryRun = request.GetArg("dryRun", "false")
+            .Equals("true", StringComparison.OrdinalIgnoreCase);
         var hasMutating = items.Any(it => !ReadOnlyBatchVerbs.Contains(it.Command ?? ""));
         var atomic = !bestEffort && hasMutating;
 
@@ -1250,7 +1257,10 @@ public class ResidentServer : IDisposable
         // debounce would have run it. Ordered before promotion: mutations
         // cannot exist while !_editable, so the not-yet-promoted case needs no
         // barrier.
-        if (atomic && _editable && _dirty)
+        // A dry-run must NEVER write the document to disk, so the barrier's
+        // Save is skipped (it would serialize the pre-batch in-memory tree even
+        // though the dry-run's point is to leave disk untouched).
+        if (atomic && !dryRun && _editable && _dirty)
         {
             // FLUSH=off promises "disk writes only on explicit save/close/
             // shutdown" — the barrier's implicit Save would break that
@@ -1318,9 +1328,14 @@ public class ResidentServer : IDisposable
         // watchdog out), so rolling back is: drop the poisoned in-memory DOM
         // without serializing it (DiscardOnDispose) and reload the pre-batch
         // file. The reload pays one parse — only on the failure path.
+        //
+        // A dry-run with mutations rolls back the SAME way unconditionally:
+        // run each item against the live in-memory tree to get an accurate
+        // per-step verdict, then discard the tree and reload so none of its
+        // mutations survive past the dry-run call.
         var anyFailed = results.Any(r => !r.Success);
         var rolledBack = false;
-        if (atomic && anyFailed)
+        if ((atomic && anyFailed) || (dryRun && hasMutating))
         {
             switch (_handler)
             {
@@ -1360,7 +1375,11 @@ public class ResidentServer : IDisposable
         // envelope.success / exit code in lockstep with the non-resident
         // path.
         _lastBatchHadFailure = anyFailed;
-        CommandBuilder.PrintBatchResults(results, json, items.Count, atomicRolledBack: rolledBack);
+        // partialRetained mirrors the non-resident path: best-effort ran in
+        // place, so a failure kept the earlier successes (nothing rolled back).
+        // Not flagged for dry-run (nothing persisted) or for atomic rollback.
+        var partialRetained = !rolledBack && anyFailed && !dryRun;
+        CommandBuilder.PrintBatchResults(results, json, items.Count, atomicRolledBack: rolledBack, dryRun: dryRun, partialRetained: partialRetained);
         // BUG-BT2: emit the collected unrecognized-LaTeX markers so the
         // dispatcher maps them to exit 2 and the envelope warning code, exactly
         // as the single-shot resident add/set path (EmitUnrecognizedLatex) does.
@@ -1378,8 +1397,8 @@ public class ResidentServer : IDisposable
         // re-render; unknown verbs fail open to notify. An atomic rollback
         // also skips: the document is byte-identical to what the preview
         // already shows, so pushing a frame would be a lie about a change
-        // that never landed.
-        if (hasMutating && !rolledBack)
+        // that never landed. Dry-run also skips: it leaves no changes on disk.
+        if (hasMutating && !rolledBack && !dryRun)
             NotifyWatchFullRefresh();
     }
 
@@ -2402,6 +2421,19 @@ public class ResidentServer : IDisposable
         var props = req.GetProps();
         var resultPath = _handler.Move(path, to, BuildInsertPosition(req), props.Count > 0 ? props : null);
         Console.WriteLine($"Moved to {resultPath}");
+    }
+
+    private void ExecuteLayout(ResidentRequest req)
+    {
+        var path = req.GetArg("path", "/");
+        if (_handler is not OfficeCli.Handlers.PowerPointHandler pptHandler)
+            throw new InvalidOperationException("'layout' is only supported for .pptx files.");
+        var message = pptHandler.LayoutSlide(
+            path,
+            req.GetArgOrNull("align"),
+            req.GetArgOrNull("distribute"),
+            req.GetArgOrNull("targets"));
+        Console.WriteLine(message);
     }
 
     private void ExecuteRefresh(ResidentRequest req)

@@ -35,12 +35,24 @@ static partial class CommandBuilder
         + "{\"command\":\"meta\",\"dumpVersion\":1} first and its \\n are read as line breaks again.\n\n"
         + "Clean-slate replay (dump->batch into a fresh target): `create` refuses to overwrite an "
         + "existing file (exit 1, code file_exists) and refuses one a live resident still holds "
-        + "(exit 1, code file_locked). A script that ignores create's exit code then replays onto "
-        + "the PREVIOUS run's document, so add style / add bookmark items fail with 'already exists'. "
+        + "(exit 1, code file_locked). A script that ignores create's exit code then replays onto the "
+        + "PREVIOUS run's document, so add style / add bookmark items fail with 'already exists'. "
         + "Reliable idiom: close -> rm -> create -> batch -> close. rm BEFORE create matters: with the "
         + "on-disk file gone, create auto-closes a resident still pinning that path; the leading close "
         + "just covers the handle-release window. (`create --force` overwrites an existing file but "
-        + "does NOT release a resident lock — close first when a resident is up.)";
+        + "does NOT release a resident lock — close first when a resident is up.)\n\n"
+        + "`--dry-run` reports exactly which steps would succeed/fail against a throwaway copy, "
+        + "writing nothing to disk — run it before committing a long multi-step replay.\n\n"
+        + "Building a LONG document (hundreds of elements): the batch must be chunked because a "
+        + "single command line has a length limit. Default is ATOMIC — one failed item discards the "
+        + "ENTIRE chunk (the original file is untouched, so index numbers in your next chunk still "
+        + "refer to the pre-chunk world; a '0 succeeded' after many steps you expected to apply is "
+        + "the rollback telling you exactly that). To apply step-by-step and KEEP the success while "
+        + "marking the failures (the autocommit mode agents want for long rebuilds), pass "
+        + "`--best-effort --stop-on-error=false`: every item is executed in order, a failing item is "
+        + "flagged in the results with its index, the rest of the batch still runs, and nothing is "
+        + "rolled back. Use `--dry-run` first to see which steps will fail before committing the "
+        + "real chunk.";
 
     /// <summary>
     /// Apply a batch of commands against an already-open handler. This is the
@@ -149,6 +161,7 @@ static partial class CommandBuilder
         // old apply-what-succeeds semantics for callers that want partial
         // progress (e.g. lossy replays of dumps with known-unsupported items).
         var batchBestEffortOpt = new Option<bool>("--best-effort") { Description = "Apply the items that succeed even when others fail (pre-atomic legacy semantics). Default: any failure rolls back the whole batch" };
+        var batchDryRunOpt = new Option<bool>("--dry-run", "-n") { Description = "Validate the whole batch without persisting anything: execute every step against an in-memory temp copy (never the original), report which steps succeed/fail, then discard the copy. No disk write, no resident mutation. Great for checking a 39-step replay before committing it." };
         var batchCommand = new Command("batch", BatchHelpDescription);
         batchCommand.Add(batchFileArg);
         batchCommand.Add(batchInputOpt);
@@ -156,6 +169,7 @@ static partial class CommandBuilder
         batchCommand.Add(batchForceOpt);
         batchCommand.Add(batchStopOpt);
         batchCommand.Add(batchBestEffortOpt);
+        batchCommand.Add(batchDryRunOpt);
         batchCommand.Add(jsonOption);
 
         batchCommand.SetAction(result => { var json = result.GetValue(jsonOption); return SafeRun(() =>
@@ -170,6 +184,7 @@ static partial class CommandBuilder
             var stopOnError = result.GetValue(batchStopOpt);
             var forceFlag = result.GetValue(batchForceOpt);
             var bestEffort = result.GetValue(batchBestEffortOpt);
+            var dryRun = result.GetValue(batchDryRunOpt);
 
             string jsonText;
             // BUG-R7-09 (F-6): previously --commands/--input/stdin were
@@ -289,10 +304,23 @@ static partial class CommandBuilder
                 // JsonException whose message exposed the C# generic type name
                 // (`System.Collections.Generic.List`1[OfficeCli.BatchItem]`).
                 // Convert it to a human-friendly error first so AI agents and
-                // humans see a stable, model-agnostic diagnostic.
-                throw new ArgumentException(
-                    $"Batch input must be a JSON array. Got: {rootKind.ToString().ToLowerInvariant()}. "
-                    + "Wrap a single item like [{\"command\":\"get\",\"path\":\"/\"}].");
+                // humans see a stable, model-agnostic diagnostic — and echo what
+                // was actually parsed so the caller can see why it was rejected.
+                var kind = rootKind.ToString().ToLowerInvariant();
+                var detail = new List<string> { $"Got: {kind}." };
+                if (rootKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    var keys = jsonDoc.RootElement.EnumerateObject().Select(p => $"\"{p.Name}\"");
+                    detail.Add($"Object carries key(s): {string.Join(", ", keys)}.");
+                    bool hasCommand = jsonDoc.RootElement.TryGetProperty("command", out _);
+                    detail.Add(hasCommand
+                        ? "This looks like a single batch item — wrap it in an array, e.g. [{\"command\":\"get\",\"path\":\"/\"}]."
+                        : "Wrap a single item like [{\"command\":\"get\",\"path\":\"/\"}].");
+                }
+                var excerpt = OfficeCli.Core.DisplayText.Truncate(jsonText.Trim(), 120);
+                if (excerpt.Length > 0)
+                    detail.Add($"Received input (truncated): {excerpt}");
+                throw new ArgumentException($"Batch input must be a JSON array. {string.Join(" ", detail)}");
             }
             if (jsonDoc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
             {
@@ -308,7 +336,14 @@ static partial class CommandBuilder
                                 unknown.Add(prop.Name);
                         }
                         if (unknown.Count > 0)
-                            throw new ArgumentException($"batch item[{ri}]: unknown field(s) {string.Join(", ", unknown.Select(f => $"\"{f}\""))}. Valid fields: {string.Join(", ", BatchItem.KnownFields)}");
+                        {
+                            // Echo the offending item (truncated) so the caller can
+                            // spot which entry / key-pair tripped the validator.
+                            var itemExcerpt = OfficeCli.Core.DisplayText.Truncate(elem.GetRawText(), 120);
+                            throw new ArgumentException(
+                                $"batch item[{ri}]: unknown field(s) {string.Join(", ", unknown.Select(f => $"\"{f}\""))}. Valid fields: {string.Join(", ", BatchItem.KnownFields)}."
+                                + (itemExcerpt.Length > 0 ? $" Item: {itemExcerpt}" : ""));
+                        }
                     }
                     ri++;
                 }
@@ -400,7 +435,8 @@ static partial class CommandBuilder
                         ["batchJson"] = jsonText,
                         ["force"] = force.ToString(),
                         ["stopOnError"] = stopOnError.ToString(),
-                        ["bestEffort"] = bestEffort.ToString()
+                        ["bestEffort"] = bestEffort.ToString(),
+                        ["dryRun"] = dryRun.ToString()
                     }
                 };
                 // CONSISTENCY(resident-two-step): long connectTimeoutMs so the
@@ -436,6 +472,14 @@ static partial class CommandBuilder
             // the legacy run-in-place semantics; all-read-only batches skip the
             // copy (nothing to protect).
             var atomic = !bestEffort && items.Any(it => !ReadOnlyBatchVerbs.Contains(it.Command ?? ""));
+            // Dry-run bakes the copy decision into the copy itself: it must
+            // ALWAYS run against a temp copy (never the original — running
+            // in place would leak mutations to the real file), and must NEVER
+            // promote. So useCopy = mutating regardless of bestEffort, and the
+            // promote below is skipped entirely.
+            var useCopy = dryRun
+                ? items.Any(it => !ReadOnlyBatchVerbs.Contains(it.Command ?? ""))
+                : atomic;
             // Resolve a symlink up front so the final promote replaces the
             // TARGET file; a plain rename would overwrite the link itself.
             string targetPath;
@@ -443,7 +487,7 @@ static partial class CommandBuilder
             catch { targetPath = file.FullName; }
             string? tmpPath = null;
             var workPath = targetPath;
-            if (atomic)
+            if (useCopy)
             {
                 var tmpDir = System.IO.Path.GetDirectoryName(targetPath) ?? ".";
                 var tmpStem = TruncateStemForTempName(System.IO.Path.GetFileNameWithoutExtension(targetPath));
@@ -561,7 +605,7 @@ static partial class CommandBuilder
                 // Watch preview: only when the document actually changes — the
                 // atomic rollback leaves the file exactly as the preview
                 // already shows it, so a refresh would be a lie (and a waste).
-                if (batchResults.Any(r => r.Success) && (batchSuccessLocal || !atomic))
+                if (batchResults.Any(r => r.Success) && !dryRun && (batchSuccessLocal || !atomic))
                     NotifyWatch(handler, file.FullName, null);
             }
             catch
@@ -573,10 +617,13 @@ static partial class CommandBuilder
                 throw;
             }
             // The using-Dispose above fully serialized the (temp) document;
-            // promote it over the original only on an all-green batch.
+            // promote it over the original only on an all-green batch. A
+            // dry-run NEVER promotes — the temp copy is discarded either way
+            // so the on-disk document is untouched, and the verdict is
+            // signalled purely via the per-step results above.
             if (tmpPath != null)
             {
-                if (batchSuccessLocal)
+                if (batchSuccessLocal && !dryRun)
                 {
                     // Same-volume atomic swap; the temp copy carries the fully
                     // saved post-batch document. A failing swap (target made
@@ -630,16 +677,17 @@ static partial class CommandBuilder
                 });
             }
             var rolledBack = atomic && !batchSuccess;
+            var partialRetained = !atomic && !batchSuccess && !dryRun;
             if (json)
             {
                 using var sw = new System.IO.StringWriter();
-                PrintBatchResults(batchResults, json, items.Count, sw, atomicRolledBack: rolledBack);
+                PrintBatchResults(batchResults, json, items.Count, sw, atomicRolledBack: rolledBack, dryRun: dryRun, partialRetained: partialRetained);
                 var inner = sw.ToString().TrimEnd('\n', '\r');
                 Console.WriteLine(OfficeCli.Core.OutputFormatter.WrapEnvelope(inner, batchWarnings, success: batchSuccess));
             }
             else
             {
-                PrintBatchResults(batchResults, json, items.Count, atomicRolledBack: rolledBack);
+                PrintBatchResults(batchResults, json, items.Count, atomicRolledBack: rolledBack, dryRun: dryRun, partialRetained: partialRetained);
                 foreach (var w in batchWarnings)
                     Console.Error.WriteLine($"  WARNING: {w.Message}");
             }

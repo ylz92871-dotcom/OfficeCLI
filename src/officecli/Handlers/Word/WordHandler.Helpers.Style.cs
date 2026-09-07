@@ -46,6 +46,56 @@ public partial class WordHandler
             .Any(s => string.Equals(s.StyleId?.Value, styleId, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// When a referenced paragraph style does not exist (e.g. applying
+    /// <c>style=Heading1</c> to a blank document whose Styles part has no
+    /// headings), auto-create a minimal paragraph style so the reference
+    /// actually resolves in Word instead of showing a "style not found"
+    /// badge. Based on Normal; an outline level is derived from a
+    /// <c>HeadingN</c> / <c>标题 N</c> name so TOC generation picks it up.
+    /// Returns null when the style already exists (no-op).
+    /// </summary>
+    internal Style? EnsureParagraphStyle(string styleId)
+    {
+        if (StyleIdExists(styleId)) return null;
+
+        var stylesPart = _doc.MainDocumentPart?.StyleDefinitionsPart;
+        if (stylesPart == null)
+        {
+            stylesPart = _doc.MainDocumentPart!.AddNewPart<StyleDefinitionsPart>();
+            stylesPart.Styles = new Styles();
+        }
+        stylesPart.Styles ??= new Styles();
+
+        var style = new Style
+        {
+            StyleId = styleId,
+            Type = StyleValues.Paragraph,
+            CustomStyle = OnOffValue.FromBoolean(true)
+        };
+        // CT_Style child order: name → basedOn → … → pPr. Append in that
+        // relative order; a paragraph style needs a name and a base.
+        style.Append(new StyleName { Val = styleId });
+        style.Append(new BasedOn { Val = "Normal" });
+        var headingLevel = ParseStyleHeadingLevel(styleId);
+        if (headingLevel.HasValue)
+            style.Append(new StyleParagraphProperties(new OutlineLevel { Val = headingLevel.Value }));
+
+        stylesPart.Styles.Append(style);
+        return style;
+    }
+
+    /// <summary>Derive a 0-based outline level from a <c>Heading1</c>/<c>标题 2</c>
+    /// style id/name. Returns null when the style isn't heading-shaped.</summary>
+    private static int? ParseStyleHeadingLevel(string styleId)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(styleId, @"(?:Heading|标题)\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        if (!int.TryParse(m.Groups[1].Value, out var n)) return null;
+        n = Math.Max(1, Math.Min(n, 9));
+        return n - 1;
+    }
+
     private string GetStyleName(Paragraph para)
     {
         var styleId = para.ParagraphProperties?.ParagraphStyleId?.Val?.Value;
@@ -129,5 +179,57 @@ public partial class WordHandler
     {
         return styleName is "Normal" or "正文" or "Body Text" or "Body" or "a"
             || styleName.StartsWith("Normal");
+    }
+
+    /// <summary>
+    /// Apply the <c>typography.preset=zh-body</c> compound preset to a
+    /// paragraph: set an East Asian body face (SimSun/宋体) on every run and on
+    /// the paragraph mark so CJK text stops falling back to an unknown default,
+    /// and set the paragraph rhythm to a CJK-friendly single-spaced body
+    /// (line rule atLeast, single-line, no space after). Run-level — lives here
+    /// because it is easiest to read next to the East-asian helpers, and it is
+    /// invoked from <see cref="WordHandler.Set.Element"/> where the paragraph is
+    /// in hand.
+    /// </summary>
+    private static void ApplyTypography_Body_Zh(
+        Paragraph para, ParagraphProperties pProps, List<string>? warnings)
+    {
+        const string eaFont = "SimSun";
+        // Runs keep their existing explicit western face; only the East Asia slot
+        // is pinned to a Chinese body face so latin tokens stay on the doc's font
+        // while CJK glyphs resolve deterministically.
+        foreach (var run in para.Elements<Run>())
+        {
+            var rProps = run.RunProperties ?? run.PrependChild(new RunProperties());
+            var rf = rProps.GetFirstChild<RunFonts>();
+            if (rf == null)
+            {
+                rf = new RunFonts();
+                // CT_RPr schema order: rFonts must come first (before b/i/sz…).
+                rProps.PrependChild(rf);
+            }
+            rf.EastAsia = eaFont;
+        }
+        // Paragraph-mark rPr needs the eastAsia face too, or the line rhythm
+        // cursor can still fall back.
+        var markRPr = pProps.ParagraphMarkRunProperties;
+        if (markRPr != null)
+        {
+            var mrF = markRPr.GetFirstChild<RunFonts>();
+            if (mrF == null)
+            {
+                mrF = new RunFonts();
+                markRPr.PrependChild(mrF);
+            }
+            mrF.EastAsia = eaFont;
+        }
+
+        // Rhythm: CJK body conventionally lineRule=atLeast single (so a line is
+        // never compressed below one full ascent of the letters), spaceAfter 0.
+        var spacing = pProps.SpacingBetweenLines ?? (pProps.SpacingBetweenLines = new SpacingBetweenLines());
+        spacing.Line = "240";                                          // single
+        spacing.LineRule = LineSpacingRuleValues.AtLeast;              // never compress
+        spacing.After = "0";
+        warnings?.Add($"zh-body preset: eastAsia font set to '{eaFont}' on all runs of this paragraph");
     }
 }

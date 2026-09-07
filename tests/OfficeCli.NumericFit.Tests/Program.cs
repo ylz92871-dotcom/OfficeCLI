@@ -6,6 +6,7 @@ using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
 using OfficeCli.Core;
 using OfficeCli.Handlers;
+using W = DocumentFormat.OpenXml.Wordprocessing;
 
 const string NumericOverflowSubtype = "numeric_overflow";
 const string GeneralPrecisionSubtype = "general_precision_loss";
@@ -14,6 +15,9 @@ var standardPath = Path.Combine(Path.GetTempPath(), $"officecli-numeric-fit-{Gui
 var date1904Path = Path.Combine(Path.GetTempPath(), $"officecli-numeric-fit-1904-{Guid.NewGuid():N}.xlsx");
 var generalPath = Path.Combine(Path.GetTempPath(), $"officecli-general-precision-{Guid.NewGuid():N}.xlsx");
 var stylelessPath = Path.Combine(Path.GetTempPath(), $"officecli-general-styleless-{Guid.NewGuid():N}.xlsx");
+var p2DocxPath = Path.Combine(Path.GetTempPath(), $"officecli-p2-{Guid.NewGuid():N}.docx");
+var paginationDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-pagination-{Guid.NewGuid():N}.docx");
+var cjkDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-cjk-typography-{Guid.NewGuid():N}.docx");
 try
 {
     CreateStandardFixture(standardPath);
@@ -29,6 +33,20 @@ try
     VerifyStylelessWorkbook(stylelessPath);
 
     Console.WriteLine("XLSX numeric-fit issue tests passed.");
+
+    CreateBlankDocx(p2DocxPath);
+    VerifyDocxCjkTypography(p2DocxPath);
+    VerifyDocxLineSpacingPreset(p2DocxPath);
+    VerifyDocxMissingStyleAutoCreate(p2DocxPath);
+    Console.WriteLine("P2 DOCX typography/linespacing/style tests passed.");
+
+    CreateBlankDocx(paginationDocxPath);
+    VerifyDocxPaginationInference(paginationDocxPath);
+    Console.WriteLine("PAGINATION DOCX static-inference tests passed.");
+
+    CreateBlankDocx(cjkDocxPath);
+    VerifyDocxCjkTypographyPreset(cjkDocxPath);
+    Console.WriteLine("CJK DOCX typography-preset tests passed.");
 }
 finally
 {
@@ -36,6 +54,9 @@ finally
     if (File.Exists(date1904Path)) File.Delete(date1904Path);
     if (File.Exists(generalPath)) File.Delete(generalPath);
     if (File.Exists(stylelessPath)) File.Delete(stylelessPath);
+    if (File.Exists(p2DocxPath)) File.Delete(p2DocxPath);
+    if (File.Exists(paginationDocxPath)) File.Delete(paginationDocxPath);
+    if (File.Exists(cjkDocxPath)) File.Delete(cjkDocxPath);
 }
 
 static void VerifyStandardWorkbook(string path)
@@ -578,4 +599,127 @@ static void VerifyStylelessWorkbook(string path)
             .Where(issue => issue.Subtype == GeneralPrecisionSubtype)
             .Select(issue => issue.Path),
         "styleless workbook is all-General");
+}
+
+static void CreateBlankDocx(string path)
+{
+    using var doc = WordprocessingDocument.Create(path, WordprocessingDocumentType.Document);
+    var mainPart = doc.AddMainDocumentPart();
+    mainPart.Document = new W.Document(new W.Body(new W.Paragraph()));
+    mainPart.Document.Save();
+}
+
+static void VerifyDocxCjkTypography(string path)
+{
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "，这是中文" });
+        var issues = handler.ViewAsIssues("format");
+        Assert(issues.Any(i => i.Subtype == "kinsoku_violation"),
+            "paragraph starting with a closing CJK punct should surface a kinsoku_violation");
+    }
+}
+
+static void VerifyDocxLineSpacingPreset(string path)
+{
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "preset test" });
+        handler.Set("/body/p[1]", new Dictionary<string, string> { ["linespacing.preset"] = "relaxed" });
+    }
+
+    using var doc = WordprocessingDocument.Open(path, false);
+    var para = doc.MainDocumentPart!.Document!.Body!.Elements<W.Paragraph>().First();
+    var sp = para.ParagraphProperties?.SpacingBetweenLines;
+    Assert(sp?.Line?.Value == "360", "relaxed preset should write w:line=360, got " + sp?.Line?.Value);
+    Assert(sp?.After?.Value == "240", "relaxed preset should write w:after=240, got " + sp?.After?.Value);
+    Assert(sp?.LineRule?.Value == W.LineSpacingRuleValues.Auto,
+        "relaxed preset should write lineRule=auto, got " + sp?.LineRule?.Value);
+}
+
+static void VerifyDocxMissingStyleAutoCreate(string path)
+{
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "heading" });
+        // Heading9 does not exist on a blank docx — Set should auto-create it.
+        handler.Set("/body/p[1]", new Dictionary<string, string> { ["style"] = "Heading9" });
+    }
+
+    using var doc = WordprocessingDocument.Open(path, false);
+    var styles = doc.MainDocumentPart!.StyleDefinitionsPart;
+    Assert(styles != null && styles.Styles!.Elements<W.Style>().Any(s => s.StyleId?.Value == "Heading9"),
+        "setting a missing heading style should auto-create it in the styles part");
+    var para = doc.MainDocumentPart.Document!.Body!.Elements<W.Paragraph>().First();
+    Assert(para.ParagraphProperties?.ParagraphStyleId?.Val?.Value == "Heading9",
+        "paragraph should reference the auto-created style");
+}
+
+static void VerifyDocxPaginationInference(string path)
+{
+    // Fixture order: [p1] kicker leading text, [p2] Heading1 title
+    // (kicker_keep_next), [p3] card + keepNext but no keepLines (card_split_risk),
+    // [p4] pageBreakBefore (its prev is the card, not a break), [p5] pageBreakBefore
+    // again — p5 duplicates p4's boundary → page_break_duplicate.
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "Chapter kicker lead-in" });
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "Chapter One", ["style"] = "Heading1" });
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "bordered card body", ["shd"] = "solid;EFEFEF", ["keepNext"] = "true" });
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "page A", ["pageBreakBefore"] = "true" });
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "page B", ["pageBreakBefore"] = "true" });
+    }
+
+    using var handler2 = new WordHandler(path, editable: false);
+    var issues = handler2.ViewAsIssues("format").ToList();
+
+    var kicker = issues.Where(i => i.Subtype == "kicker_keep_next").ToList();
+    Assert(kicker.Count == 1,
+        $"expected exactly one kicker_keep_next, got {kicker.Count}: {string.Join(" | ", kicker.Select(i => i.Message))}");
+    Assert(kicker[0].Path.Contains("/body/") && kicker[0].Path.Contains("/p["),
+        "kicker issue should be scoped to a body paragraph path, got " + kicker[0].Path);
+
+    var card = issues.Where(i => i.Subtype == "card_split_risk").ToList();
+    Assert(card.Count == 1,
+        $"expected exactly one card_split_risk, got {card.Count}: {string.Join(" | ", card.Select(i => i.Message))}");
+    Assert(card[0].Suggestion?.Contains("keepLines", StringComparison.Ordinal) == true,
+        "card advice should point at keepLines");
+
+    var dup = issues.Where(i => i.Subtype == "page_break_duplicate").ToList();
+    Assert(dup.Count == 1,
+        $"expected exactly one page_break_duplicate, got {dup.Count}: {string.Join(" | ", dup.Select(i => i.Message))}");
+}
+
+static void VerifyDocxCjkTypographyPreset(string path)
+{
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        // CreateBlankDocx seeds one empty paragraph, so /body/p[1] is the blank,
+        // /body/p[2] = "这是中文正文", /body/p[3] = "需缩进的段".
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "这是中文正文" });
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "需缩进的段" });
+        // zh-body compound preset: eastAsia face on runs + atLeast single rhythm.
+        handler.Set("/body/p[2]", new Dictionary<string, string> { ["typography.preset"] = "zh-body" });
+        // zh-first-indent: char-relative 2-char indent (w:firstLineChars=200).
+        handler.Set("/body/p[3]", new Dictionary<string, string> { ["typography.preset"] = "zh-first-indent" });
+    }
+
+    using var doc = WordprocessingDocument.Open(path, false);
+    var paras = doc.MainDocumentPart!.Document!.Body!.Elements<W.Paragraph>().ToList();
+    var bodyPara = paras.First(p => p.InnerText.Contains("这是中文正文"));
+    var indentPara = paras.First(p => p.InnerText.Contains("需缩进的段"));
+
+    var bodyRun = bodyPara.Elements<W.Run>().First();
+    var ea = bodyRun.RunProperties?.GetFirstChild<W.RunFonts>()?.EastAsia?.Value;
+    Assert(ea == "SimSun", "zh-body should set eastAsia=SimSun on runs, got " + (ea ?? "<none>"));
+    var sp = bodyPara.ParagraphProperties?.SpacingBetweenLines;
+    Assert(sp?.LineRule?.Value == W.LineSpacingRuleValues.AtLeast,
+        "zh-body should set lineRule=atLeast, got " + sp?.LineRule?.Value);
+    Assert(sp?.After?.Value == "0", "zh-body should set spaceAfter=0, got " + sp?.After?.Value);
+
+    var indent = indentPara.ParagraphProperties?.Indentation;
+    Assert(indent?.FirstLineChars?.Value == 200,
+        "zh-first-indent should set firstLineChars=200 (2 chars), got " + indent?.FirstLineChars?.Value);
+    Assert(indent?.FirstLine == null,
+        "zh-first-indent must clear a hard w:firstLine so the char rule is the only indent source");
 }

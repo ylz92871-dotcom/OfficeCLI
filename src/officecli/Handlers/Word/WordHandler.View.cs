@@ -31,6 +31,34 @@ public partial class WordHandler
     }
 
     /// <summary>
+    /// CJK closing/ending punctuation that must NOT legally start a line
+    /// (kinsoku / 禁则 processing). Used for the advisory kinsoku check.
+    /// </summary>
+    private const string KinsokuLineStartPunct =
+        "，。；：、！？）】〉》」』｝…—・．．″％‰℃＄＃＆＊＋－／＝＠＼｜《》〈〉【】" +
+        ",.;:!?)]}%%‰";
+    // Keep a conservative core set: CJK closing marks + a handful of Latin
+    // equivalents. Openers （『「（【［〈《〔 etc. are deliberately excluded —
+    // they correctly begin lines.
+
+    /// <summary>True when the string contains any CJK ideograph or CJK
+    /// punctuation (BMP + Extension A + Compatibility + CJK punctuation block).</summary>
+    private static bool ContainsCjk(string s)
+    {
+        foreach (var ch in s)
+        {
+            if (ch >= 0x3000 && ch <= 0x303F) return true;   // CJK symbols/punct
+            if (ch >= 0x4E00 && ch <= 0x9FFF) return true;   // unified ideographs
+            if (ch >= 0x3400 && ch <= 0x4DBF) return true;   // ext A
+            if (ch >= 0xF900 && ch <= 0xFAFF) return true;   // compatibility
+            if (ch >= 0xFF01 && ch <= 0xFF65) return true;   // fullwidth forms
+            if (ch >= 0x2018 && ch <= 0x201D) return true;   // curly quotes “ ” ‘ ’
+            if (ch == 0x2026) return true;                   // …
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Represents a body element with optional SDT context.
     /// When a paragraph/table is inside an SdtBlock, SdtBlock is set.
     /// </summary>
@@ -1407,7 +1435,162 @@ public partial class WordHandler
                 runIdx++;
             }
 
+            // CJK typography advisory checks. Format-level warnings that do NOT
+            // touch schema validation (OpenXmlValidator path) — they only add
+            // observability for 禁则/字体回退 issues Word handles silently.
+            var paraText = GetParagraphText(para).TrimStart();
+            if (paraText.Length > 0)
+            {
+                var first = paraText[0];
+                if (KinsokuLineStartPunct.IndexOf(first) >= 0)
+                {
+                    issues.Add(new DocumentIssue
+                    {
+                        Id = $"F{++issueNum}",
+                        Type = IssueType.Format,
+                        Subtype = "kinsoku_violation",
+                        Severity = IssueSeverity.Warning,
+                        Path = $"/body/{BuildParaPathSegment(para, lineNum + 1)}",
+                        Message = "行首出现禁则标点（避头尾违规）",
+                        Context = first.ToString(),
+                        Suggestion = "开启禁则处理（set / --prop kinsoku=true）或重排该段首字符"
+                    });
+                }
+            }
+
+            var cjkRuns = GetAllRuns(para);
+            int eaRunIdx = 0;
+            foreach (var run in cjkRuns)
+            {
+                if (!ContainsCjk(GetRunText(run))) { eaRunIdx++; continue; }
+                // ResolveEffectiveRunProperties walks the run → paragraph →
+                // style → DocDefaults chain, so a run that declares no EastAsian
+                // face (only Ascii/HighAnsi) still reports null here, matching
+                // Word's own CJK-fallback default. Advisory only.
+                var ea = ResolveEffectiveRunProperties(run, para).RunFonts?.EastAsia?.Value;
+                if (ea == null)
+                {
+                    issues.Add(new DocumentIssue
+                    {
+                        Id = $"F{++issueNum}",
+                        Type = IssueType.Format,
+                        Subtype = "font_fallback_ea",
+                        Severity = IssueSeverity.Warning,
+                        Path = $"/body/{BuildParaPathSegment(para, lineNum + 1)}/r[{eaRunIdx + 1}]",
+                        Message = "中文字体未设置，回退到默认字体",
+                        Context = "eastAsiaFont='<none>'",
+                        Suggestion = "为含中文的文本指定中文字体（set … --prop font=<中文字体名>）"
+                    });
+                    break; // one advisory per paragraph to limit noise
+                }
+                eaRunIdx++;
+            }
+
             if (limit.HasValue && issues.Count >= limit.Value) break;
+        }
+
+        // ==================== Pagination static-inference ====================
+        // Word's page breaks are decided at render time by the paginator, so the
+        // CLI cannot truly know whether two blocks fall on the same page. These
+        // checks are therefore heuristics over the *declared* pagination
+        // properties: they flag patterns that produce page-break bugs the user
+        // only ever sees downstream in a screenshot (the reported pain point),
+        // before any rendering. Advisory-only Warnings; never block validate.
+        //
+        // A paragraph "reads as a page break" when it is a bare page via
+        // <w:br w:type="page"/> (the `break=newPage` / explicit `pagebreak`
+        // mechanism) or carries pageBreakBefore=true.
+        static bool IsPageBreakPara(Paragraph p)
+        {
+            if (p.ParagraphProperties?.PageBreakBefore != null)
+                return p.ParagraphProperties.PageBreakBefore.Val?.Value != false;
+            return p.Descendants<Break>().Any(b => b.Type?.Value == BreakValues.Page);
+        }
+
+        var bodyParas = GetBodyElements(body).OfType<Paragraph>().ToList();
+        var outlineLevels = BuildStyleOutlineLevels();
+        for (int pi = 0; pi < bodyParas.Count; pi++)
+        {
+            if (limit.HasValue && issues.Count >= limit.Value) break;
+            var para = bodyParas[pi];
+            var pProps = para.ParagraphProperties;
+            var seg = BuildParaPathSegment(para, pi + 1);
+
+            // ---- page_break_duplicate: two break mechanisms at one boundary ----
+            var hasBreakBefore = pProps?.PageBreakBefore != null
+                && pProps.PageBreakBefore.Val?.Value != false;
+            if (hasBreakBefore && pi > 0 && IsPageBreakPara(bodyParas[pi - 1]))
+            {
+                issues.Add(new DocumentIssue
+                {
+                    Id = $"F{++issueNum}",
+                    Type = IssueType.Format,
+                    Subtype = IssueSubtypes.PageBreakDuplicate,
+                    Severity = IssueSeverity.Warning,
+                    Path = $"/body/{seg}",
+                    Message = "重复分页：该段 pageBreakBefore=true，但其前一段已经是分页（显式 pagebreak 或 pageBreakBefore），会多出一个空分页",
+                    Context = $"prev={GetParagraphText(bodyParas[pi - 1])?.Trim()}",
+                    Suggestion = "两个分页机制只保留一个：删除本段的 pageBreakBefore 或前一页的分页符"
+                });
+            }
+
+            // ---- kicker_keep_next: a lead-in line glued to the following heading ----
+            // A short non-heading "kicker"/lead paragraph directly before a
+            // heading, with no keepNext, can be stranded on the prior page while
+            // the heading jumps to the next — splitting the kicker+title pair.
+            var hasKeepNext = pProps?.KeepNext != null && pProps.KeepNext.Val?.Value != false;
+            var isHeading = GetParagraphOutlineLevel(para, outlineLevels, out _) >= 0;
+            var paraTextLen = GetParagraphText(para).Trim().Length;
+            if (!hasKeepNext && !isHeading && !hasBreakBefore
+                && pi + 1 < bodyParas.Count)
+            {
+                var next = bodyParas[pi + 1];
+                var nextIsHeading = GetParagraphOutlineLevel(next, outlineLevels, out _) >= 0;
+                // Kicker heuristic: a short text lead-in (≤40 chars), not itself a
+                // list/indent block, sitting directly above a heading.
+                var isShortLead = paraTextLen > 0 && paraTextLen <= 40
+                    && pProps?.NumberingProperties == null
+                    && pProps?.Indentation?.LeftChars == null
+                    && pProps?.Indentation?.Left == null;
+                if (nextIsHeading && isShortLead)
+                {
+                    issues.Add(new DocumentIssue
+                    {
+                        Id = $"F{++issueNum}",
+                        Type = IssueType.Format,
+                        Subtype = IssueSubtypes.KickerKeepNext,
+                        Severity = IssueSeverity.Warning,
+                        Path = $"/body/{seg}",
+                        Message = "kicker/前导行未设 keepNext，分页时可能与其后的标题被拆开成两页",
+                        Context = $"next heading = \"{GetParagraphText(next)?.Trim()}\"",
+                        Suggestion = $"set \"{GetParagraphText(para).Trim()}\"-所在段 --prop keepNext=true（或让标题 keepNext=true）让 kicker 与标题同页"
+                    });
+                }
+            }
+
+            // ---- card_split_risk: a shaded/bordered "card" box that can split ----
+            // A paragraph carrying paragraph shading and/or a paragraph border is
+            // Word's native way to fake a rounded"card". Without keepLines (box
+            // must not split internally) the shading/border can be torn across a
+            // page boundary — "broken card" the user only notices once rendered.
+            var hasShading = pProps?.Shading != null && pProps.Shading.Fill?.Value is { Length: > 0 };
+            var hasPBorder = pProps?.ParagraphBorders != null
+                && pProps.ParagraphBorders.ChildElements.Any(b => b is TopBorder or BottomBorder or LeftBorder or RightBorder or BetweenBorder or BarBorder);
+            var hasKeepLines = pProps?.KeepLines != null && pProps.KeepLines.Val?.Value != false;
+            if ((hasShading || hasPBorder) && !hasKeepLines && paraTextLen > 0)
+            {
+                issues.Add(new DocumentIssue
+                {
+                    Id = $"F{++issueNum}",
+                    Type = IssueType.Format,
+                    Subtype = IssueSubtypes.CardSplitRisk,
+                    Severity = IssueSeverity.Warning,
+                    Path = $"/body/{seg}",
+                    Message = "卡片（底纹/边框段）未设 keepLines，分页时可能被从中间割裂成两页",
+                    Context = hasShading ? "shading present" : "paragraph border present",
+                    Suggestion = $"set \"{GetParagraphText(para).Trim()}\"-所在段 --prop keepLines=true（若需整卡与后文同页再加 keepNext=true）；单格表格卡片则对表格行设 cantSplit=true"
+                });
+            }
         }
 
         // Dynamic fields written but not rendered — same observability pattern

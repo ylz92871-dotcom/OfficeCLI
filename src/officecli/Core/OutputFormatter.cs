@@ -131,6 +131,8 @@ internal static class WarningContext
 [JsonSerializable(typeof(decimal))]
 [JsonSerializable(typeof(double))]
 [JsonSerializable(typeof(string))]
+[JsonSerializable(typeof(DocumentDiff.DiffSummary))]
+[JsonSerializable(typeof(List<DocumentDiff.SlideDiff>))]
 internal partial class AppJsonContext : JsonSerializerContext;
 
 internal static class OutputFormatter
@@ -781,6 +783,43 @@ internal static class OutputFormatter
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>Human-readable text rendering of a document diff.</summary>
+    public static string FormatDiffText(DocumentDiff.DiffSummary summary)
+    {
+        var sb = new StringBuilder();
+        var kind = summary.Format == "docx" ? "paragraph" : "slide";
+        sb.AppendLine($"Comparing {summary.Format} docs: {summary.OldCount} old → {summary.NewCount} new");
+        sb.AppendLine($"  added: {summary.Added}   removed: {summary.Removed}   changed: {summary.Changed}   unchanged: {summary.Unchanged}");
+        sb.AppendLine();
+
+        foreach (var d in summary.Slides)
+        {
+            switch (d.Status)
+            {
+                case "added":
+                    sb.AppendLine($"+ {kind} {d.NewIndex}: added");
+                    AppendLines(sb, d.LinesNew, "        ");
+                    break;
+                case "removed":
+                    sb.AppendLine($"- {kind} {d.OldIndex}: removed");
+                    AppendLines(sb, d.LinesOld, "        ");
+                    break;
+                case "changed":
+                    sb.AppendLine($"~ {kind} {d.OldIndex} → {d.NewIndex}: changed (similarity {d.Similarity:0.00})");
+                    AppendLines(sb, d.LinesOld, "  -   ");
+                    AppendLines(sb, d.LinesNew, "  +   ");
+                    break;
+            }
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private static void AppendLines(StringBuilder sb, List<string> lines, string prefix)
+    {
+        foreach (var line in lines)
+            sb.AppendLine($"{prefix}{line}");
     }
 
     private static string FormatNodeAsText(DocumentNode node)

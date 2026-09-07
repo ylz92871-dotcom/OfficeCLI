@@ -102,6 +102,54 @@ internal static class HtmlScreenshot
         return ok && File.Exists(outPath) && new FileInfo(outPath).Length > 0;
     }
 
+    /// <summary>
+    /// Print <paramref name="htmlPath"/> to a PDF via a chrome-family browser's
+    /// <c>--print-to-pdf</c> mode (built-in PDF fallback when no exporter plugin
+    /// is installed). Headers/footers are disabled so the output matches the
+    /// preview, not a browser chrome surround. Returns true on a non-empty PDF.
+    /// </summary>
+    public static bool CapturePdf(string htmlPath, string outPath, int timeoutMs = 120000)
+    {
+        var bin = FindChrome();
+        if (bin == null) return false;
+        outPath = Path.GetFullPath(outPath);
+        var outDir = Path.GetDirectoryName(outPath);
+        if (!string.IsNullOrEmpty(outDir)) Directory.CreateDirectory(outDir);
+        var url = new Uri(Path.GetFullPath(htmlPath)).AbsoluteUri + "#screenshot";
+        var args = new[]
+        {
+            "--headless=new",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--hide-scrollbars",
+            "--virtual-time-budget=15000",
+            "--timeout=20000",  // wall-clock backstop: a stalled resource is not rescued by virtual time (issue #181)
+            "--no-pdf-header-footer",
+            $"--print-to-pdf={outPath}",
+            url,
+        };
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = bin,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
+            if (p == null) return false;
+            p.StandardOutput.ReadToEnd();
+            if (!p.WaitForExit(timeoutMs)) { try { p.Kill(true); } catch { } return false; }
+            return File.Exists(outPath) && new FileInfo(outPath).Length > 0;
+        }
+        catch { return false; }
+    }
+
     public static PaginationResult? GetPaginationFromDom(string htmlPath, int timeoutMs = 60000)
     {
         var stdout = DumpDom(htmlPath, timeoutMs);

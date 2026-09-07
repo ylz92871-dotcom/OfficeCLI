@@ -63,7 +63,7 @@ static partial class CommandBuilder
                 "  officecli skills <agent>                Install base SKILL.md to a specific agent",
                 "  officecli skills list                   List all available skills",
                 "",
-                "Skills: pptx, word, excel, word-form, morph-ppt, morph-ppt-3d, pitch-deck, academic-paper, data-dashboard, financial-model",
+                "Skills: pptx, word, excel, word-form, morph-ppt, morph-ppt-3d, pitch-deck, academic-paper, data-dashboard, financial-model, docx-design",
                 "Agents: claude, copilot, codex, cursor, windsurf, minimax, opencode, openclaw, nanobot, zeroclaw, hermes, all",
             },
             ["load_skill"] = new[]
@@ -73,7 +73,7 @@ static partial class CommandBuilder
                 "  officecli load_skill <name>                 Print the skill's SKILL.md + a manifest of its bundled reference files",
                 "  officecli load_skill <name> --path <relpath> Print one bundled reference file (e.g. --path reference/decision-rules.md)",
                 "",
-                "Skills: pptx, word, excel, word-form, morph-ppt, morph-ppt-3d, pitch-deck, academic-paper, data-dashboard, financial-model",
+                "Skills: pptx, word, excel, word-form, morph-ppt, morph-ppt-3d, pitch-deck, academic-paper, data-dashboard, financial-model, docx-design",
                 "To install a skill (with binary assets) on disk, run: officecli skills install <name>",
             },
             ["install"] = new[]
@@ -96,6 +96,7 @@ static partial class CommandBuilder
     ///   help &lt;format&gt; &lt;verb&gt;         → list elements supporting that verb
     ///   help &lt;format&gt; &lt;element&gt;      → full element detail
     ///   help &lt;format&gt; &lt;verb&gt; &lt;element&gt; → verb-filtered element detail
+    ///   help &lt;format&gt; &lt;verb&gt; &lt;element&gt; &lt;property&gt; → single property detail
     ///
     /// The middle arg is interpreted as verb iff it matches HelpVerbs.
     /// Mirrors the actual CLI structure: `officecli &lt;verb&gt; &lt;file&gt; ...`, so
@@ -119,6 +120,11 @@ static partial class CommandBuilder
             Description = "Element name when a verb was given (e.g. 'help docx add chart').",
             Arity = ArgumentArity.ZeroOrOne,
         };
+        var fourthArg = new Argument<string?>("property")
+        {
+            Description = "Optional property name on the element to drill into (e.g. 'help pptx add shape animation').",
+            Arity = ArgumentArity.ZeroOrOne,
+        };
         // Scoped to `help` only — `help all`/`help <fmt> all` can emit either:
         //   --json   one envelope-wrapped JSON document (matches other CLI
         //            commands; one parse for the whole corpus)
@@ -136,6 +142,7 @@ static partial class CommandBuilder
         command.Add(formatArg);
         command.Add(secondArg);
         command.Add(thirdArg);
+        command.Add(fourthArg);
         command.Add(jsonOption);
         command.Add(jsonlOption);
 
@@ -146,6 +153,7 @@ static partial class CommandBuilder
             var format = result.GetValue(formatArg);
             var second = result.GetValue(secondArg);
             var third = result.GetValue(thirdArg);
+            var property = result.GetValue(fourthArg);
 
             // Disambiguate middle arg: is it a verb or an element?
             string? verb = null;
@@ -192,13 +200,13 @@ static partial class CommandBuilder
                 }
             }
 
-            return SafeRun(() => RunHelp(format, verb, element, json, jsonl, rootCommand), json);
+            return SafeRun(() => RunHelp(format, verb, element, property, json, jsonl, rootCommand), json);
         });
 
         return command;
     }
 
-    private static int RunHelp(string? format, string? verb, string? element, bool json, bool jsonl, RootCommand? rootCommand)
+    private static int RunHelp(string? format, string? verb, string? element, string? property, bool json, bool jsonl, RootCommand? rootCommand)
     {
         // --json and --jsonl are mutually exclusive on `help all` / `help <fmt>
         // all`: the first emits one envelope-wrapped JSON document, the second
@@ -284,6 +292,7 @@ static partial class CommandBuilder
             Console.WriteLine("  officecli help <format> <verb>                  Elements supporting the verb");
             Console.WriteLine("  officecli help <format> <element>               Full element detail");
             Console.WriteLine("  officecli help <format> <verb> <element>        Verb-filtered element detail");
+            Console.WriteLine("  officecli help <format> <verb> <element> <prop>  One property's detail");
             Console.WriteLine("  officecli help <format> <element> --json        Raw schema JSON");
             Console.WriteLine("  officecli help all                              Flat dump of every (format,element,property) — pipe to grep");
             Console.WriteLine("  officecli help all --json                       Same dump as one envelope-wrapped JSON document");
@@ -405,11 +414,60 @@ static partial class CommandBuilder
         }
 
         // Case 3: format + (optional verb) + element — render schema.
+        // Case 3b: … + property — drill into a single property's detail.
         using var doc = SchemaHelpLoader.LoadSchema(format, element);
+        if (property != null)
+        {
+            if (SchemaHelpRenderer.TryRenderPropertyPage(doc, verb, property, json, out var propText))
+            {
+                Console.WriteLine(propText);
+                return 0;
+            }
+            // Unknown property — list the element's valid props (verb-filtered)
+            // with a closest-match suggestion, mirroring the unknown-element error.
+            var valid = SchemaHelpLoader.ListProperties(canonicalFormat, element, verb ?? "");
+            var best = ClosestProperty(property, valid);
+            var suggestion = best != null ? $" Did you mean: {best}?" : "";
+            Console.Error.WriteLine(
+                $"error: unknown property '{SchemaHelpLoader.TruncateForError(property, 64)}' "
+                + $"for '{canonicalFormat} {element}'.{suggestion}");
+            if (valid.Count > 0)
+            {
+                Console.Error.WriteLine("Valid properties: " + string.Join(", ", valid));
+            }
+            Console.Error.WriteLine($"Use: officecli help {canonicalFormat} {element}" + (verb != null ? $" {verb}" : ""));
+            return 1;
+        }
         Console.WriteLine(json
             ? SchemaHelpRenderer.RenderJson(doc)
             : SchemaHelpRenderer.RenderHuman(doc, verb));
         return 0;
+    }
+
+    /// <summary>
+    /// Suggest the closest valid property name to a user-supplied one, using
+    /// substring + Levenshtein — the same rule SchemaHelpLoader.ClosestMatch
+    /// applies to format/element lookups.
+    /// </summary>
+    private static string? ClosestProperty(string input, IReadOnlyList<string> candidates)
+    {
+        var lower = input.ToLowerInvariant();
+        var substringHit = candidates.FirstOrDefault(
+            c => c.Contains(lower, StringComparison.OrdinalIgnoreCase)
+                 || lower.Contains(c, StringComparison.OrdinalIgnoreCase));
+        string? best = null;
+        int bestDist = int.MaxValue;
+        foreach (var c in candidates)
+        {
+            var dist = OfficeCli.Core.EditDistance.Damerau(lower, c.ToLowerInvariant());
+            var maxDist = Math.Max(2, lower.Length / 3);
+            if (dist <= maxDist && dist < bestDist)
+            {
+                best = c;
+                bestDist = dist;
+            }
+        }
+        return best ?? substringHit;
     }
 
 }

@@ -1134,8 +1134,17 @@ public partial class WordHandler
                 // R7 deferred BT-4: warn (advisory, non-fatal) when the
                 // style id does not exist in the styles part — opening
                 // such a doc in Word shows a "style not found" badge.
-                if (warnings != null && !StyleIdExists(value))
-                    warnings.Add($"style '{value}' not found in styles part — will be referenced as-is");
+                // BUG-P2: also auto-create a minimal paragraph style so the
+                // reference actually resolves (one-click heading apply on a
+                // blank doc), instead of leaving a dangling styleId.
+                if (!StyleIdExists(value))
+                {
+                    var autoCreated = EnsureParagraphStyle(value);
+                    if (warnings != null)
+                        warnings.Add(autoCreated != null
+                            ? $"style '{value}' did not exist — created a minimal paragraph style (basedOn Normal); refine via add /styles --type style"
+                            : $"style '{value}' not found in styles part — will be referenced as-is");
+                }
                 pProps.ParagraphStyleId = new ParagraphStyleId { Val = value };
                 return true;
             case "stylename":
@@ -1445,6 +1454,35 @@ public partial class WordHandler
                 spacingLine.Line = lsTwips.ToString();
                 spacingLine.LineRule = lsIsMultiplier ? LineSpacingRuleValues.Auto : LineSpacingRuleValues.Exact;
                 return true;
+            // Named line-spacing presets (with a following-spacing companion), so
+            // callers can apply a whole paragraph rhythm in one prop instead of
+            // separate lineSpacing + lineRule + spaceAfter commands.
+            case "linespacing.preset":
+            {
+                var spacingPreset = pProps.SpacingBetweenLines ?? (pProps.SpacingBetweenLines = new SpacingBetweenLines());
+                switch (value.Trim().ToLowerInvariant())
+                {
+                    case "compact":
+                        spacingPreset.Line = "240";          // single
+                        spacingPreset.LineRule = LineSpacingRuleValues.Auto;
+                        spacingPreset.After = "0";
+                        break;
+                    case "normal":
+                        spacingPreset.Line = "240";          // single + Word default ~6pt after
+                        spacingPreset.LineRule = LineSpacingRuleValues.Auto;
+                        spacingPreset.After = "120";
+                        break;
+                    case "relaxed":
+                        spacingPreset.Line = "360";          // 1.5x
+                        spacingPreset.LineRule = LineSpacingRuleValues.Auto;
+                        spacingPreset.After = "240";         // ~12pt
+                        break;
+                    default:
+                        throw new ArgumentException(
+                            $"Unknown lineSpacing preset '{value}'. Supported: compact, normal, relaxed.");
+                }
+                return true;
+            }
             case "linerule" or "linespacingrule":
                 // BUG-019: explicit override needed to distinguish AtLeast
                 // from Exact — both serialize as "Npt" via SpacingConverter.

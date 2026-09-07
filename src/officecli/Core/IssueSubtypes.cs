@@ -56,6 +56,47 @@ public static class IssueSubtypes
     /// skipped to keep false positives near zero. Format bucket, Warning.</summary>
     public const string LowContrast = "low_contrast";
 
+    /// <summary>pptx-only: text fill (textFill/textgradient) uses an advanced
+    /// feature (path gradient, multiple stops, blip/image fill) that the HTML/
+    /// SVG preview cannot render accurately — the preview will show a solid
+    /// single color as an approximation. The OOXML document itself carries the
+    /// full gradient/image fill so PowerPoint will render it correctly; the
+    /// warning only flags that the CLI preview will not match what PowerPoint
+    /// shows. Format bucket, Warning.</summary>
+    public const string TextFillRendererApproximated = "text_fill_renderer_approximated";
+
+    /// <summary>pptx-only: text warp (textWarp) is only marked by a class in the
+    /// HTML preview; the preview cannot warp individual glyphs like PowerPoint
+    /// does, so the visual approximation will not match what PowerPoint shows.
+    /// Format bucket, Info.</summary>
+    public const string TextWarpRendererApproximated = "text_warp_renderer_approximated";
+
+    /// <summary>docx-only: a paragraph that reads like a kicker (short line,
+    /// not a heading itself) is immediately followed by a heading paragraph,
+    /// but neither the kicker nor the heading carries keepNext — so on a page
+    /// boundary the heading (or the kicker) can be shoved onto the next page,
+    /// splitting the kicker+title pair. Static pagination risk: the CLI cannot
+    /// know the rendered page height / current layout, so it reports a Warning
+    /// rather than an error. Fix: <c>set path --prop keepNext=true</c> on the
+    /// kicker paragraph. Format bucket, Warning.</summary>
+    public const string KickerKeepNext = "kicker_keep_next";
+    /// <summary>docx-only: a "card"-style paragraph (carries paragraph shading
+    /// and/or a paragraph border, so Word renders it as a shaded/bordered box)
+    /// does not set keepNext/keepLines, so the box can be split across a page
+    /// boundary — a "broken card" the user only notices once rendered. For a
+    /// single-cell table acting as a card, verify the row sets cantSplit. Static
+    /// pagination risk; Warning. Fix: <c>set path --prop keepLines=true</c>
+    /// (and keepNext=true when the card must stay glued to the following block),
+    /// or set cantSplit on the table row. Format bucket, Warning.</summary>
+    public const string CardSplitRisk = "card_split_risk";
+    /// <summary>docx-only: a paragraph sets pageBreakBefore=true but its
+    /// predecessor is either an explicit page header (pagebreak) or already
+    /// carries pageBreakBefore, so the boundary will double-break and Word may
+    /// insert a blank page. Static pagination risk; Warning. Fix: remove one of
+    /// the two page-break mechanisms (keep exactly one per logical boundary).
+    /// Format bucket, Warning.</summary>
+    public const string PageBreakDuplicate = "page_break_duplicate";
+
     /// <summary>Broad IssueType bucket names — the canonical surface shown
     /// in error messages and help. Single-letter aliases (<see cref="BucketAliases"/>)
     /// are accepted by Validate but kept out of the user-facing list so the
@@ -79,6 +120,8 @@ public static class IssueSubtypes
         FormulaNotEvaluated, FormulaCacheStale, FormulaRefMissingSheet, FormulaEvalError,
         FieldNotEvaluated, FieldCacheStale,
         SlideFieldNotEvaluated, NotesUnresolvedRid, LowContrast,
+        TextFillRendererApproximated, TextWarpRendererApproximated,
+        KickerKeepNext, CardSplitRisk, PageBreakDuplicate,
         ChartSeriesRefMissingSheet, ChartCacheStale,
         DefinedNameBroken, DefinedNameTargetMissing,
         BrokenPartRef, NumericOverflow, GeneralPrecisionLoss,
@@ -102,7 +145,7 @@ public static class IssueSubtypes
             + "Opt-in only (request by exact name; not included in --type content): "
             + string.Join(", ", OptInSubtypes) + ". "
             + "Subtypes are format-specific — formula_* / chart_* / definedname_* / numeric_overflow apply to xlsx, "
-            + "field_* to docx, slide_field_* / notes_unresolved_rid / broken_part_ref / low_contrast to pptx; requesting a subtype that does not apply to "
+            + "field_* / kicker_keep_next / card_split_risk / page_break_duplicate to docx, slide_field_* / notes_unresolved_rid / broken_part_ref / low_contrast to pptx; requesting a subtype that does not apply to " 
             + "the queried file returns count=0 (not an error). "
             + "All values are case-insensitive and surrounding whitespace is trimmed.";
     }

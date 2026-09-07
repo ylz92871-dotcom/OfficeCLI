@@ -181,11 +181,13 @@ static partial class CommandBuilder
         rootCommand.Add(BuildRemoveCommand(jsonOption));
         rootCommand.Add(BuildMoveCommand(jsonOption));
         rootCommand.Add(BuildSwapCommand(jsonOption));
+        rootCommand.Add(BuildLayoutCommand(jsonOption));
         rootCommand.Add(BuildRefreshCommand(jsonOption));
         rootCommand.Add(BuildRawCommand(jsonOption));
         rootCommand.Add(BuildRawSetCommand(jsonOption));
         rootCommand.Add(BuildAddPartCommand(jsonOption));
         rootCommand.Add(BuildValidateCommand(jsonOption));
+        rootCommand.Add(BuildDiffCommand(jsonOption));
         rootCommand.Add(BuildSaveCommand(jsonOption));
         rootCommand.Add(BuildBatchCommand(jsonOption));
         rootCommand.Add(BuildDumpCommand(jsonOption));
@@ -1177,6 +1179,24 @@ static partial class CommandBuilder
                 };
                 return $"Swapped {p1} <-> {p2}";
             }
+            case "layout":
+            {
+                // First-class geometric layout (the one-call replacement for
+                // get-coords → hand-compute → N×set). Batch form mirrors the
+                // standalone verb: path + align/distribute/targets ride props.
+                if (string.IsNullOrEmpty(item.Path))
+                    throw new ArgumentException("'layout' command requires 'path' field (a slide path). Example: {\"command\": \"layout\", \"path\": \"/slide[2]\", \"props\": {\"align\": \"bottom\"}}");
+                var layoutPath = item.Path;
+                OfficeCli.Core.MutationSelectorGuard.EnsureScoped(layoutPath, "layout");
+                if (handler is not OfficeCli.Handlers.PowerPointHandler layoutPpt)
+                    throw new CliException("'layout' is only supported for .pptx files.")
+                        { Code = "unsupported_type" };
+                return layoutPpt.LayoutSlide(
+                    layoutPath,
+                    props.GetValueOrDefault("align"),
+                    props.GetValueOrDefault("distribute"),
+                    props.GetValueOrDefault("targets"));
+            }
             case "view":
             {
                 var mode = item.Mode ?? "text";
@@ -1343,7 +1363,7 @@ static partial class CommandBuilder
         return true;
     }
 
-    internal static void PrintBatchResults(List<BatchResult> results, bool json, int totalCount = 0, TextWriter? output = null, bool atomicRolledBack = false)
+    internal static void PrintBatchResults(List<BatchResult> results, bool json, int totalCount = 0, TextWriter? output = null, bool atomicRolledBack = false, bool dryRun = false, bool partialRetained = false)
     {
         var @out = output ?? Console.Out;
         if (totalCount == 0) totalCount = results.Count;
@@ -1370,6 +1390,13 @@ static partial class CommandBuilder
                 // discarded the batch — parsers keying on the existing
                 // summary fields are unaffected.
                 if (atomicRolledBack) writer.WriteBoolean("atomicRolledBack", true);
+                // Additive field: --best-effort ran in place, so failures did
+                // NOT discard the chunk — the successfully applied items are
+                // retained on disk. Present only when partial retention is the
+                // actual outcome, so parsers keying on existing fields are
+                // unaffected.
+                if (partialRetained) writer.WriteBoolean("partialRetained", true);
+                if (dryRun) writer.WriteBoolean("dryRun", true);
                 writer.WriteEndObject();
                 writer.WriteEndObject();
             }
@@ -1419,6 +1446,8 @@ static partial class CommandBuilder
                     slimWriter.WriteNumber("failed", failed);
                     slimWriter.WriteNumber("skipped", skipped);
                     if (atomicRolledBack) slimWriter.WriteBoolean("atomicRolledBack", true);
+                    if (partialRetained) slimWriter.WriteBoolean("partialRetained", true);
+                    if (dryRun) slimWriter.WriteBoolean("dryRun", true);
                     slimWriter.WriteEndObject();
                     slimWriter.WriteEndObject();
                 }
@@ -1449,7 +1478,11 @@ static partial class CommandBuilder
             // FROZEN TEXT: the "Batch complete: N succeeded, M failed" skeleton
             // is a machine-consumed contract — extend by SUFFIX only.
             var atomicNote = atomicRolledBack ? " (atomic: no changes were applied)" : "";
-            @out.WriteLine($"\nBatch complete: {succeeded} succeeded, {failed} failed, {results.Count} total{atomicNote}");
+            var partialNote = !atomicRolledBack && partialRetained ? " (best-effort: succeeded items were retained, failed items were not)" : "";
+            if (dryRun)
+                @out.WriteLine($"\nBatch complete (dry-run): {succeeded} would succeed, {failed} would fail, {results.Count} total — nothing was written");
+            else
+                @out.WriteLine($"\nBatch complete: {succeeded} succeeded, {failed} failed, {results.Count} total{atomicNote}{partialNote}");
         }
     }
 
@@ -1664,8 +1697,9 @@ static partial class CommandBuilder
         "highlight", "alignment", "spacing", "indent", "shd", "border",
         "width", "height", "valign", "header", "formula", "value", "type",
         "fill", "src", "path", "title", "name", "style", "caps", "smallcaps",
-        "lineSpacing", "listStyle", "start", "level", "cols", "rows",
+        "lineSpacing", "lineSpacing.preset", "listStyle", "start", "level", "cols", "rows",
         "gridspan", "vmerge", "nowrap", "padding", "margin",
+        "typography.preset",
         "orientation", "pageWidth", "pageHeight",
         "x", "y", "cx", "cy", "rotation", "opacity",
         "border.color", "border.width", "border.style",
