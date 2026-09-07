@@ -182,6 +182,75 @@ officecli set "$FILE" /body/p[N] --prop typography.preset=zh-first-indent   # w:
 
 ---
 
+## Power layout (已内置，别再手搓)
+
+这些能力工具**原生支持**，只是旧 skill 没教。设计文档优先用它们，而不是散落的硬编码 hex / 空段模拟。
+
+### 主题一次换色（替代全文硬编码 hex）
+
+`create` 的 docx 自带默认主题 part。换一套配色 = 改 theme 槽位，所有引用该槽的段落/表格跟着变：
+
+```bash
+officecli set "$FILE" / --prop theme.color.accent1=E6A23C    # 改主强调色
+officecli set "$FILE" / --prop theme.color.accent2=1F4E79    # 改次强调色
+officecli set "$FILE" / --prop theme.font.major.eastAsia=SimHei
+officecli set "$FILE" / --prop theme.font.minor.latin=Georgia
+```
+
+可用槽位：`dk1 lt1 dk2 lt2 accent1..accent6 hlink folHlink`（颜色），`theme.font.major/minor.{latin,eastasia}`（字体）。
+`get --json` 可回读 `theme.color.accent1` 等。段落显式 hex 优先于主题，因此**尽量让颜色来自主题槽位**而非逐段写死。
+
+### 跨页表头重复 + 整行不裂（长表格）
+
+```bash
+officecli set "$FILE" /body/tbl[1]/tr[1] --prop header=true      # 每页重复表头行
+officecli set "$FILE" /body/tbl[1]/tr[1] --prop cantSplit=true   # 该行不被拆到两页
+```
+
+### 竖排（段 / 单元格 / textbox）
+
+```bash
+officecli add "$FILE" /body --type section --prop textDirection=tbRl   # 整节竖排（tbRl = 竖排从右到左）
+# 表格单元格 / textbox 内：--prop textDirection=<tbRl|lrTb|tbLr>
+```
+
+### 多栏（杂志排版）
+
+```bash
+officecli add "$FILE" /body --type section --prop columns=2          # 两栏
+officecli set  "$FILE" /body/sectPr --prop columns.count=2 --prop columns.space=360
+# 可选：columns.equalWidth=true/false、columns.separator=true（栏间竖线）、colWidths=4cm,3cm
+```
+
+### 文字环绕与锚定（浮动 textbox/shape）
+
+`add type=shape`（或 `textbox`）产出 `<wp:anchor>` 浮动图形，可设绝对位置与环绕：
+
+```bash
+officecli add "$FILE" /body --type shape \
+  --prop text="边栏" --prop wrap=square        # square|tight|topbottom|behind|infront|none
+  --prop positionH=right --prop positionV=top   # 页边距锚定
+  --prop behindDoc=true                          # 置于文字之后（水印/背景块）
+```
+
+`wrap=square/tight` 实现图文混排（文字绕排）；`behind`/`infront` 做叠层。
+
+### 表格 → 图表（sourceTable 糖）
+
+从已存在表格一键生成图表，免手写 `data=Series:1,2,3`：
+
+```bash
+officecli add "$FILE" /body --type table \
+  --prop data="Quarter,Revenue;Q1,100;Q2,150;Q3,200;Q4,250" --prop header=true
+officecli add "$FILE" /body --type chart \
+  --prop sourceTable=/body/tbl[1] --prop chartType=column --prop title="季度营收"
+```
+
+约定：首行为表头 → 每列一条 series（列名作 series 名），首列数据行作 categories；
+全数值表格（无表头）→ 各列名为 `Series N`。`data=`/`seriesN=` 显式数据优先于 `sourceTable`。
+
+---
+
 ## Performance / long-document build (dump → batch → replay)
 
 A single command line has a length cap, so a long doc is built in chunks. **Batch default is ATOMIC**:

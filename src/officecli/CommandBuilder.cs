@@ -1713,6 +1713,7 @@ static partial class CommandBuilder
         "axisPosition", "crosses", "crossesAt", "crossBetween", "axisOrientation", "logBase",
         "dispUnits", "labelOffset", "tickLabelSkip",
         "gridlines", "minorGridlines", "plotFill", "chartFill",
+        "sourceTable",
         "colors", "gradient", "gradients", "lineWidth", "lineDash",
         "marker", "markerSize", "transparency", "smooth", "showMarker",
         "scatterStyle", "radarStyle", "varyColors", "dispBlanksAs",

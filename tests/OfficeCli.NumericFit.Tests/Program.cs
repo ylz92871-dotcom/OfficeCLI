@@ -18,6 +18,7 @@ var stylelessPath = Path.Combine(Path.GetTempPath(), $"officecli-general-stylele
 var p2DocxPath = Path.Combine(Path.GetTempPath(), $"officecli-p2-{Guid.NewGuid():N}.docx");
 var paginationDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-pagination-{Guid.NewGuid():N}.docx");
 var cjkDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-cjk-typography-{Guid.NewGuid():N}.docx");
+var chartDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-tablechart-{Guid.NewGuid():N}.docx");
 try
 {
     CreateStandardFixture(standardPath);
@@ -47,6 +48,10 @@ try
     CreateBlankDocx(cjkDocxPath);
     VerifyDocxCjkTypographyPreset(cjkDocxPath);
     Console.WriteLine("CJK DOCX typography-preset tests passed.");
+
+    CreateBlankDocx(chartDocxPath);
+    VerifyDocxTableToChart(chartDocxPath);
+    Console.WriteLine("TABLE->CHART DOCX sourceTable sugar tests passed.");
 }
 finally
 {
@@ -57,6 +62,7 @@ finally
     if (File.Exists(p2DocxPath)) File.Delete(p2DocxPath);
     if (File.Exists(paginationDocxPath)) File.Delete(paginationDocxPath);
     if (File.Exists(cjkDocxPath)) File.Delete(cjkDocxPath);
+    if (File.Exists(chartDocxPath)) File.Delete(chartDocxPath);
 }
 
 static void VerifyStandardWorkbook(string path)
@@ -722,4 +728,33 @@ static void VerifyDocxCjkTypographyPreset(string path)
         "zh-first-indent should set firstLineChars=200 (2 chars), got " + indent?.FirstLineChars?.Value);
     Assert(indent?.FirstLine == null,
         "zh-first-indent must clear a hard w:firstLine so the char rule is the only indent source");
+}
+
+static void VerifyDocxTableToChart(string path)
+{
+    // Create a table with a header row (Quarter) + one numeric column (Revenue),
+    // then a chart whose categories/series come from the table via dataTable=.
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        // Table `data=` parse grid: ',' per cell, ';' per row (DelimitedText
+        // falls back to `,`/`;` because the value is not a resolvable file src).
+        handler.Add("/body", "table", null, new Dictionary<string, string>
+        {
+            ["data"] = "Quarter,Revenue;Q1,100;Q2,150;Q3,200;Q4,250",
+            ["header"] = "true",
+        });
+        // Windowed: blank seed paragraph precedes the table, so /body/tbl[1] is it.
+        var chartPath = handler.Add("/body", "chart", null, new Dictionary<string, string>
+        {
+            ["sourceTable"] = "/body/tbl[1]",
+            ["chartType"] = "column",
+        });
+        Assert(chartPath.StartsWith("/chart["), "sourceTable chart should resolve to a /chart[N] path, got " + chartPath);
+    }
+
+    using var doc = WordprocessingDocument.Open(path, false);
+    // The chart part must be physically present (the dataTable sugar produced a
+    // real chart, not a silent no-op).
+    Assert(doc.MainDocumentPart!.ChartParts.Any(),
+        "dataTable chart should create a ChartPart in the package");
 }
