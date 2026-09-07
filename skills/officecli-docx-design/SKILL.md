@@ -64,7 +64,41 @@ Chinese Typography) or the CJK glyphs silently fall back to an unknown font. Use
 
 ---
 
+## Style Gallery (`preset=`) — pick a visual identity first
+
+The six building blocks below are built into the CLI as one-command **presets**. **Before writing a
+document, pick the presets you will use** (the style-gallery workflow): decide the card look, the kicker
+look, the quote look up front, then apply with `preset=` instead of hand-writing `shd=/pbdr=/keepLines=`
+per paragraph. This keeps the palette consistent across the whole document — the same reason a designer
+defines a style before writing.
+
+| `preset=` | What it produces |
+|---|---|
+| `card` | Light warm callout card — `FFF4E5` fill, 1pt amber border, `keepLines` (never torn across pages) |
+| `card-dark` | Navy `1F4E79` card, white bold text, 2pt navy border, `keepLines` |
+| `kicker` | Amber small-caps lead line (`E6A23C`, caps, 11pt) glued to the following title with `keepNext` |
+| `band` | Full-width amber section color-band |
+| `quote` | Centered italic navy `16pt` pull quote with a thick left rule |
+| `table-header` | Row-level navy fill + white bold text (repeat header on each page via `header=true`) |
+
+Usage — one command, on `add` or `set`:
+
+```bash
+officecli add "$FILE" /body --type paragraph --prop text="要点" --prop preset=card
+officecli set "$FILE" /body/p[3] --prop preset=kicker
+officecli set "$FILE" /body/tbl[1]/tr[1] --prop preset=table-header
+```
+
+An unknown preset name errors and lists the available names (never silently ignored). Every preset is
+render-safe: solid fills only, no gradients, so what you ask for is what renders. The hand-written
+recipes below remain the fallback when you need a bespoke card/quote/band that the presets don't cover.
+
+---
+
 ## Recipes (all officecli)
+
+Each recipe below shows the **hand-written** version (for bespoke variants). For the standard look,
+prefer the matching `preset=` from the Style Gallery above — one command, consistent palette.
 
 ### 1. Callout card (shaded box)
 

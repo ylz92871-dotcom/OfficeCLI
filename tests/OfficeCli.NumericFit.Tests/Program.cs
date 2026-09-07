@@ -19,6 +19,7 @@ var p2DocxPath = Path.Combine(Path.GetTempPath(), $"officecli-p2-{Guid.NewGuid()
 var paginationDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-pagination-{Guid.NewGuid():N}.docx");
 var cjkDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-cjk-typography-{Guid.NewGuid():N}.docx");
 var chartDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-tablechart-{Guid.NewGuid():N}.docx");
+var presetDocxPath = Path.Combine(Path.GetTempPath(), $"officecli-preset-{Guid.NewGuid():N}.docx");
 try
 {
     CreateStandardFixture(standardPath);
@@ -52,6 +53,10 @@ try
     CreateBlankDocx(chartDocxPath);
     VerifyDocxTableToChart(chartDocxPath);
     Console.WriteLine("TABLE->CHART DOCX sourceTable sugar tests passed.");
+
+    CreateBlankDocx(presetDocxPath);
+    VerifyDocxStylePreset(presetDocxPath);
+    Console.WriteLine("DOCX style-preset (preset=) tests passed.");
 }
 finally
 {
@@ -63,6 +68,7 @@ finally
     if (File.Exists(paginationDocxPath)) File.Delete(paginationDocxPath);
     if (File.Exists(cjkDocxPath)) File.Delete(cjkDocxPath);
     if (File.Exists(chartDocxPath)) File.Delete(chartDocxPath);
+    if (File.Exists(presetDocxPath)) File.Delete(presetDocxPath);
 }
 
 static void VerifyStandardWorkbook(string path)
@@ -757,4 +763,62 @@ static void VerifyDocxTableToChart(string path)
     // real chart, not a silent no-op).
     Assert(doc.MainDocumentPart!.ChartParts.Any(),
         "dataTable chart should create a ChartPart in the package");
+}
+
+static void VerifyDocxStylePreset(string path)
+{
+    // Blank seed paragraph occupies /body/p[1]. Add:
+    //   p[2] = card preset paragraph
+    //   p[3] = kicker preset paragraph
+    //   tbl[1] = table whose row[1] gets the table-header preset via Set.
+    using (var handler = new WordHandler(path, editable: true))
+    {
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "card body", ["preset"] = "card" });
+        handler.Add("/body", "paragraph", null, new Dictionary<string, string> { ["text"] = "kicker lead", ["preset"] = "kicker" });
+        handler.Add("/body", "table", null, new Dictionary<string, string> { ["cols"] = "2", ["rows"] = "2" });
+        handler.Set("/body/tbl[1]/tr[1]", new Dictionary<string, string> { ["preset"] = "table-header" });
+
+        // Unknown preset must fail loudly and list the available names.
+        bool threw = false;
+        try { handler.Set("/body/p[2]", new Dictionary<string, string> { ["preset"] = "nope" }); }
+        catch (ArgumentException ex) { threw = ex.Message.Contains("card", StringComparison.Ordinal); }
+        Assert(threw, "unknown preset should throw ArgumentException listing available presets");
+    }
+
+    using var doc = WordprocessingDocument.Open(path, false);
+    var paras = doc.MainDocumentPart!.Document!.Body!.Elements<W.Paragraph>().ToList();
+    var cardPara = paras.First(p => p.InnerText.Contains("card body"));
+    var kickerPara = paras.First(p => p.InnerText.Contains("kicker lead"));
+
+    // card: paragraph shading + border + keepLines.
+    Assert(cardPara.ParagraphProperties?.Shading?.Fill?.Value == "FFF4E5",
+        "card preset should set paragraph shading fill FFF4E5, got " + cardPara.ParagraphProperties?.Shading?.Fill?.Value);
+    Assert(cardPara.ParagraphProperties?.ParagraphBorders?.TopBorder?.Val?.Value == W.BorderValues.Single,
+        "card preset should set a single paragraph border");
+    Assert(cardPara.ParagraphProperties?.KeepLines != null,
+        "card preset should set keepLines");
+
+    // kicker: run color + caps + paragraph keepNext.
+    var kickerRun = kickerPara.Elements<W.Run>().First();
+    Assert(kickerRun.RunProperties?.Color?.Val?.Value == "E6A23C",
+        "kicker preset should set run color E6A23C, got " + kickerRun.RunProperties?.Color?.Val?.Value);
+    Assert(kickerRun.RunProperties?.Caps != null,
+        "kicker preset should set run caps");
+    Assert(kickerPara.ParagraphProperties?.KeepNext != null,
+        "kicker preset should set keepNext");
+
+    // table-header: first row cells shaded navy + white bold runs.
+    var table = doc.MainDocumentPart.Document.Body!.Elements<W.Table>().First();
+    var headerRow = table.Elements<W.TableRow>().First();
+    var firstCell = headerRow.Elements<W.TableCell>().First();
+    Assert(firstCell.TableCellProperties?.Shading?.Fill?.Value == "1F4E79",
+        "table-header preset should shade cell 1F4E79, got " + firstCell.TableCellProperties?.Shading?.Fill?.Value);
+    var cellRun = firstCell.Elements<W.Paragraph>().First().Elements<W.Run>().FirstOrDefault();
+    if (cellRun != null)
+    {
+        Assert(cellRun.RunProperties?.Color?.Val?.Value == "FFFFFF",
+            "table-header preset should set white run text");
+        Assert(cellRun.RunProperties?.Bold != null,
+            "table-header preset should set bold");
+    }
 }
