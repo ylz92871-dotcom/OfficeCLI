@@ -50,7 +50,7 @@ Before reaching for a command, know what a good xlsx looks like. These are the d
 
 **Professional font.** Use one consistent, professional font across the workbook (Arial / Calibri / Times New Roman). Don't mix four fonts because one sheet came from CSV.
 
-**Explicit widths.** Default 8.43 chars clips everything. Set width directly (`set "$FILE" "/Sheet1/col[A]" --prop width=20`) or let the CLI estimate from content: `set "$FILE" "/Sheet1/col[A]" --prop autofit=true` per column, or `set "$FILE" /Sheet1 --prop autofit=true` for every column at once. Autofit columns BEFORE deciding wrap/row heights (heights depend on final widths). Sensible manual starts when you override: labels 20-25, numbers 12-15, dates 12, short codes 8-10. Row heights have no autofit yet — set `height=` explicitly on wrapped rows.
+**Explicit widths.** Default 8.43 chars clips everything. Set width directly (`set "$FILE" "/Sheet1/col[A]" --prop width=20`) or let the CLI estimate from content: `set "$FILE" "/Sheet1/col[A]" --prop autofit=true` per column, `set "$FILE" "/Sheet1/row[7]" --prop autofit=true` per row (wrapped/CJK rows), or `set "$FILE" /Sheet1 --prop autofit=true` for everything at once (columns first, then rows — heights feed off the final widths). Sensible manual starts when you override: labels 20-25, numbers 12-15, dates 12, short codes 8-10. The row estimate is a 15pt-line-pitch heuristic; Excel's in-app autofit stays available for font-exact sizing.
 
 **Preserve existing templates.** When editing a file that already has a look, match it. Existing conventions override these guidelines.
 
