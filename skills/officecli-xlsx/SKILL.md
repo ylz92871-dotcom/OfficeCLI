@@ -50,7 +50,7 @@ Before reaching for a command, know what a good xlsx looks like. These are the d
 
 **Professional font.** Use one consistent, professional font across the workbook (Arial / Calibri / Times New Roman). Don't mix four fonts because one sheet came from CSV.
 
-**Explicit widths.** There is no auto-fit. Any column the user will read MUST have `width` set — default 8.43 chars clips everything. Sensible starts: labels 20-25, numbers 12-15, dates 12, short codes 8-10.
+**Explicit widths.** Default 8.43 chars clips everything. Set width directly (`set "$FILE" "/Sheet1/col[A]" --prop width=20`) or let the CLI estimate from content: `set "$FILE" "/Sheet1/col[A]" --prop autofit=true` per column, or `set "$FILE" /Sheet1 --prop autofit=true` for every column at once. Autofit columns BEFORE deciding wrap/row heights (heights depend on final widths). Sensible manual starts when you override: labels 20-25, numbers 12-15, dates 12, short codes 8-10. Row heights have no autofit yet — set `height=` explicitly on wrapped rows.
 
 **Preserve existing templates.** When editing a file that already has a look, match it. Existing conventions override these guidelines.
 
@@ -58,7 +58,7 @@ Before reaching for a command, know what a good xlsx looks like. These are the d
 
 Before you declare done, run `officecli view "$FILE" html` and Read the returned HTML path to confirm all of these:
 
-- **No `###` in any cell.** `###` means a column is too narrow for its widest value. Every column the user reads needs an explicit `width`. `###` in a delivered file is unfinished work, never "a small visual nit".
+- **No `###` in any cell.** `###` means a column is too narrow for its widest value. Every column the user reads needs an explicit `width` (or `autofit=true`). `###` in a delivered file is unfinished work, never "a small visual nit".
 - **No truncated titles.** Sheet titles, section headers, long labels must fit. Widen the column or apply `wrapText=true` on the cell.
 - **No placeholder tokens rendered as data.** `$fy$24`, `{var}`, `<TODO>`, `xxxx` must never appear in a cell, chart title, series name, or legend. These are build-time tokens that escaped replacement.
 - **Pie / doughnut slices have distinct fill colors.** If the slices render same-colored, switch to `bar` / `column` or set `colors=...` explicitly.
@@ -77,6 +77,10 @@ officecli set "$FILE" "/Data" --prop orientation=landscape --prop fitToPage=1x0
 ```
 
 `fitToPage=true` == `1x1` == fit both axes to one page — correct only when the sheet is already short. `1x0` = fit 1 page wide, unlimited pages tall. Trigger: sheet holds a chart, or > 8 columns, or the user's ask mentions print / board / investor.
+
+Other page-setup props, all set on the sheet path (verified 1.0.148): `printArea="Sheet1!A1:T41"`, `header='&L公司&R机密'` / `footer=` (L/C/R section codes, `&L`/`&C`/`&R`), `marginTop` / `marginBottom` / … , `printTitleRows` / `printTitleCols`, plus `rowbreak` / `colbreak` elements for manual page breaks — `officecli help xlsx sheet` for the full list.
+
+**xlsx→PDF** goes through `view "$FILE" pdf`, which requires an exporter plugin (`officecli plugins list`); without one it errors `exporter_not_found` with install guidance — that is the expected output, not a bug.
 
 ### Financial models only — skip this section if you are building a template, tracker, CSV import, or operational sheet
 
@@ -295,7 +299,7 @@ Chart types live under `officecli help xlsx chart` — the enum is long (20+). P
 | (b) 2D `dataRange` | `--prop dataRange="Sheet1!A1:B4"` (first col = categories, first row = header / series name) | Normal case. Must be **2-D** — single column fails with "Chart requires data". |
 | (c) dotted per-series | `--prop series1.name=Sales --prop series1.values="Sheet1!B2:B4" --prop series1.categories="Sheet1!A2:A4"` | Multi-series charts where each series points at non-contiguous ranges, or you want explicit series naming. `series1.values` alone (no `categories`) emits a chart with `1,2,3` as the x-axis. |
 
-**The single-column trap.** `dataRange="Sheet1!B2:B13"` looks like "value column" but the engine rejects it with `Chart requires data`. Either widen the range to include the category column (`A2:B13`), or switch to form (c) with explicit `series1.categories`.
+**The single-column trap.** `dataRange="Sheet1!B2:B13"` (one column) is consumed as the category column by default and rejected: `dataRange resolved to 0 series columns … Pass categories= explicitly`. Three fixes: widen the range to include the category column (`A2:B13`), pass `--prop categories="Sheet1!A2:A13"` so the single column plots as the value series, or switch to form (c) with explicit `series1.categories`. A **named range** works as `dataRange` (`dataRange=TempData`) and obeys the same single-column rule.
 
 **Move / resize a chart after create:** `set chart[N] --prop anchor="F5:N25"` (also `--prop x= --prop y= --prop width= --prop height=`). **Series are still immutable** — to add/change a series, `officecli remove` the chart and `officecli add` with the full series list. Note `remove chart[1]` shifts `chart[2] → chart[1]` and re-add **appends at the end** — to preserve chart order, remove all and rebuild in order.
 
@@ -357,7 +361,7 @@ Other common `type` values: `decimal`, `whole`, `date`, `textLength`, `custom`. 
 
 ### Other elements (one-liners)
 
-- **Tables** (ListObjects) — `add --type table` with a range; gives auto-filter + structured refs. `officecli help xlsx table`.
+- **Tables** (ListObjects) — one call gives auto-filter + banded skin: `add --type table --prop name=CityData --prop range=A1:B9 --prop style=medium2` (`style` accepts `TableStyleLight/Medium/Dark 1-28` or short forms `light1…`/`medium2`/`none`). Range must be ≥ 2 rows (header + 1 data row); a single-row range is rejected with a `headerRow=false` hint for data-only tables. Structured references (`=SUM(CityData[Temp])`) are **accepted but not evaluated by the built-in engine yet** — `get` shows `evaluated:false` and cell text `#OCLI_NOTEVAL!`, `view issues` reports `formula_not_evaluated`; the formula still computes when Excel opens the file. Until structured-ref evaluation ships, write plain `A1:B9` ranges in formulas you want to verify via readback. `officecli help xlsx table`.
 - **Comments** — `add --type comment`; use for documenting hardcoded assumptions. `officecli help xlsx comment`.
 - **Sheet reordering** — `officecli move`, not `swap`. `swap` only works on row/cell paths.
 
@@ -381,7 +385,7 @@ Your first workbook is almost never correct. Treat QA as a bug hunt, not a confi
 
 ### Minimum cycle before "done"
 
-1. `officecli view "$FILE" issues` — empty sheets, broken formulas, missing refs.
+1. `officecli view "$FILE" issues` — empty sheets, broken formulas, missing refs. **`issues` re-evaluates formulas with the built-in engine** — it catches `formula_eval_error` (`#DIV/0!`, `#REF!` values), `formula_cache_stale`, and `formula_not_evaluated` — so run it AFTER `validate` as the last structural gate (each issue carries `path` + `message` with `--json`).
 2. `officecli view "$FILE" annotated` (sample ranges) — values + types + warnings.
 3. For every Excel error type, query it:
    ```bash
@@ -408,6 +412,7 @@ Your first workbook is almost never correct. Treat QA as a bug hunt, not a confi
 ### Formula verification checklist
 
 - [ ] Pick 2-3 formulas at random. Run `officecli get` on each. Confirm the formula string is what you intended **and** `cachedValue=` is what you expect — arithmetic in your head.
+- [ ] **Formula closed loop on every formula you write.** `officecli get "$FILE" "/Sheet1/B5" --json` returns `formula` / `cachedValue` / `computedValue` / `evaluated` — check `evaluated:true` and `computedValue` against a mental estimate right after writing. `evaluated:false` with cell text `#OCLI_NOTEVAL!` means the built-in engine cannot evaluate that formula form (e.g. structured references) — the cell still computes when Excel opens the file, but you cannot verify it here: rewrite in plain `A1:B9` range form, or accept and note it in the delivery summary.
 - [ ] **Cached value sanity on every summary cell.** Any cell that aggregates (COUNTA / COUNTIF / SUMPRODUCT / INDEX&MATCH) must have a plausible `cachedValue`. If a progress tracker shows `199 / 199 / 100%` on a blank template, the cache is lying — re-touch the formula via `set` (forces recompute) or manually set a correct cached value. Do NOT ship "validate passes but the numbers are fiction".
 - [ ] **Spot-check one cell per numeric column.** `%` columns showing integer `0.0%` throughout means the denominator is wrong or the numerator is cached stale — investigate one cell, fix the pattern.
 - [ ] Ranges include every row: off-by-one on `SUM(B2:B12)` when data goes to `B13` is the most common bug.
@@ -456,6 +461,7 @@ EOF
 CLI constraints and gaps to work around — not defects in the output file.
 
 - **Chart series are immutable after create** — to add/change a series: `remove` + `add` with the full series list. (Position is mutable: `set chart[N] --prop anchor=` / `x/y/width/height`.) `remove chart[N]` shifts subsequent indices down; re-add appends at end.
+- **`--props` comma form is not a flag** — `--props "type=line,anchor=H20,dataRange=…"` silently drops the whole value (you get a misleading `missing_property` on add, or `Properties specified without --prop flag` + exit 2 on set). Pass repeated `--prop k=v`, or batch JSON `props`.
 - **Cross-sheet formula batches run fine through a resident** — a prior "deadlocks even at 3-5 ops" caution no longer reproduces. Pure value-set batches stay reliable at 50-80+ ops too. If you ever hit a hang, fall back to a non-resident one-big-batch or individual `set`. **Multiple resident processes on the same file/machine can still contend** — expect non-deterministic hangs if another agent/session holds a resident on the same file.
 - **Conditional formatting naming asymmetry** — the element name for `--type` is `conditionalformatting`; the path suffix is `/cf[N]`. Use `officecli help xlsx conditionalformatting` for schema, `/cf[N]` for paths.
 - **Sheet `position` prop on add** — help says Add processes `position`, but the prop is often ignored. Reorder with `officecli move --index` / `--after` / `--before` after creating the sheet.

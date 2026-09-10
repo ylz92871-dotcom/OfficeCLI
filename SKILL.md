@@ -337,6 +337,16 @@ officecli batch data.xlsx --commands '[{"op":"set","path":"/Sheet1/A1","props":{
 officecli batch data.xlsx --input updates.json --best-effort --json   # keep whatever succeeds even if some items fail
 ```
 
+**Anything beyond a handful of items: write the JSON array to a file and pass `--input`** — no shell length limits, no quoting/escaping, replayable. `add` items address their target with `parent` + `type` (not `path`); `set` items use `path`. A realistic mixed item file:
+
+```json
+[
+  {"command":"set","path":"/Sheet1/B2","props":{"value":"21.5"}},
+  {"command":"add","parent":"/Sheet1","type":"table","props":{"name":"CityData","range":"A1:B9","style":"medium2"}},
+  {"command":"add","parent":"/Sheet1","type":"chart","props":{"type":"column","anchor":"E2","dataRange":"Sheet1!A1:B9"}}
+]
+```
+
 Supports: `add`, `set`, `get`, `query`, `remove`, `move`, `swap`, `view`, `raw`, `raw-set`, `validate`. Fields: `command` (or `op`), `path`, `parent`, `type`, `from`, `to`, `index`, `after`, `before`, `props`, `selector`, `mode`, `depth`, `part`, `xpath`, `action`, `xml`.
 
 ---
@@ -367,6 +377,7 @@ officecli add-part <file> <parent>                   # create new document part 
 | Modifying an open file | Close the file in PowerPoint/WPS first |
 | `\n` in shell strings | Use `\\n` for newlines in `--prop text="..."` |
 | `$` in shell text | `--prop text="$15M"` strips `$15`. Use single quotes: `--prop text='$15M'`, or heredoc batch |
+| `--props "a=b,c=d"` comma form | Not a supported flag — the whole value is dropped and props end up empty. Pass repeated `--prop k=v`, or batch JSON `props` |
 
 ---
 
