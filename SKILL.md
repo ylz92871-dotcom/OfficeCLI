@@ -347,6 +347,21 @@ officecli batch data.xlsx --input updates.json --best-effort --json   # keep wha
 ]
 ```
 
+**Hand-written batches: prefer the text script channel `--from`** — one CLI-style command per line, no JSON quoting at all (machine-generatable too; same atomicity/reports as `--input`):
+
+```bash
+officecli batch data.xlsx --from commands.txt --best-effort --json
+```
+
+```text
+# one command per line; verb ∈ set/add/remove/move/swap
+set /Sheet1/B2 --prop value=21.5
+add /Sheet1 --type table --prop name=CityData --prop range=A1:B9 --prop style=medium2
+add /Sheet1 --type chart --prop type=column --prop anchor=E2 --prop dataRange=Sheet1!A1:B9
+```
+
+`#` full-line comments; a trailing `\` continues the line; single quotes are literal (`--prop text='$15M'`); a bad line rejects the whole script up front with `batch_parse_error` + `line N` and nothing executes.
+
 Supports: `add`, `set`, `get`, `query`, `remove`, `move`, `swap`, `view`, `raw`, `raw-set`, `validate`. Fields: `command` (or `op`), `path`, `parent`, `type`, `from`, `to`, `index`, `after`, `before`, `props`, `selector`, `mode`, `depth`, `part`, `xpath`, `action`, `xml`.
 
 ---
