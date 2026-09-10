@@ -364,6 +364,8 @@ add /Sheet1 --type chart --prop type=column --prop anchor=E2 --prop dataRange=Sh
 
 `#` full-line comments; a trailing `\` continues the line; single quotes are literal (`--prop text='$15M'`); a bad line rejects the whole script up front with `batch_parse_error` + `line N` and nothing executes.
 
+**Killed mid-batch? `--resume`.** Every mutating batch records a journal next to the target (deleted when the run completes with a verdict) — a surviving journal means the process died mid-run. `officecli batch data.xlsx --resume [--force-resume]` re-runs exactly what's needed: an atomic interruption re-runs everything (the file was untouched; hash-guarded against external edits), a best-effort interruption re-runs only the items that didn't land. The envelope's `batch_resumed` warning says what was re-run and skipped.
+
 Supports: `add`, `set`, `get`, `query`, `remove`, `move`, `swap`, `view`, `raw`, `raw-set`, `validate`. Fields: `command` (or `op`), `path`, `parent`, `type`, `from`, `to`, `index`, `after`, `before`, `props`, `selector`, `mode`, `depth`, `part`, `xpath`, `action`, `xml`.
 
 ---
