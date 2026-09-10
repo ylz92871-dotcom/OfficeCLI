@@ -377,7 +377,7 @@ officecli add-part <file> <parent>                   # create new document part 
 | Modifying an open file | Close the file in PowerPoint/WPS first |
 | `\n` in shell strings | Use `\\n` for newlines in `--prop text="..."` |
 | `$` in shell text | `--prop text="$15M"` strips `$15`. Use single quotes: `--prop text='$15M'`, or heredoc batch |
-| `--props "a=b,c=d"` comma form | Not a supported flag — the whole value is dropped and props end up empty. Pass repeated `--prop k=v`, or batch JSON `props` |
+| `--props "a=b,c=d"` comma form | Supported on set/add/remove/move/mark: `--props "a=b,c=d"` ≡ repeating `--prop k=v`. A value containing a comma: quote the value, `--props "text='a,b'"`. Other formats (get/query/batch JSON) don't take it |
 
 ---
 
