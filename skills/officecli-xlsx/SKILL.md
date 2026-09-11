@@ -283,6 +283,20 @@ officecli get "$FILE" '/Sheet1/B2' --prop trace=dependents --json   # who depend
 
 JSON: `format.trace = {root, edges: [{from, to[]}], truncated}`; without `--json` you get an indented tree. Same-sheet nodes read `/Sheet1/B2`, cross-sheet `/Sheet2!B2`. Range precedents expand to individual cells (capped at 5000 per range — past that the payload sets `truncated: true`). `trace=precedents` needs a formula cell (constants error with `unsupported_element`); `trace=dependents` works on any cell — it answers who references it. Use it before overwriting an input (what breaks?) and when auditing a delivered workbook's formula web.
 
+### Range style presets
+
+One command for the common range looks on free-form ranges (ListObject tables take `add --type table --prop style=mediumN` instead — banding that scales with the table):
+
+```bash
+officecli set "$FILE" '/Sheet1/B1:H1' --prop stylepreset=table_header      # accent fill, white bold, centered
+officecli set "$FILE" '/Sheet1/A2:A41' --prop stylepreset=table_banded     # zebra rows (cap 1000 rows)
+officecli set "$FILE" '/Sheet1/B2:T6' --prop stylepreset=kpi_card          # light accent panel, big bold number
+officecli set "$FILE" '/Sheet1/C2:C9' --prop stylepreset=metric_positive   # Excel Good green (metric_negative = red)
+officecli set "$FILE" '/Sheet1/D2:D9' --prop stylepreset=note_gray         # muted italic note
+```
+
+Presets expand to plain cell props (fill / font.color / bold / size / italic / alignment) — no new style semantics, and accent colors follow the workbook theme.
+
 ### Named ranges
 
 Prefer named ranges over `$B$6` in formulas. They self-document (`GrowthRate` beats `$B$6`) and they let you move the assumption cell without breaking formulas. Because `ref` values contain both `!` and `$`, add them through a batch heredoc:
