@@ -271,6 +271,18 @@ officecli set "$FILE" "/Sheet1/row[1]" --prop height=22
 officecli set "$FILE" "/Sheet1" --prop freeze=A2 --prop tabColor=1F4E79
 ```
 
+### Formula dependency trace
+
+Audit a formula's dependency chain without evaluating anything:
+
+```bash
+officecli get "$FILE" '/Sheet1/F2' --prop trace=precedents --json   # what F2 depends on
+officecli get "$FILE" '/Sheet1/F2' --prop trace=precedents --prop depth=3 --json  # walk 3 hops
+officecli get "$FILE" '/Sheet1/B2' --prop trace=dependents --json   # who depends on B2
+```
+
+JSON: `format.trace = {root, edges: [{from, to[]}], truncated}`; without `--json` you get an indented tree. Same-sheet nodes read `/Sheet1/B2`, cross-sheet `/Sheet2!B2`. Range precedents expand to individual cells (capped at 5000 per range — past that the payload sets `truncated: true`). `trace=precedents` needs a formula cell (constants error with `unsupported_element`); `trace=dependents` works on any cell — it answers who references it. Use it before overwriting an input (what breaks?) and when auditing a delivered workbook's formula web.
+
 ### Named ranges
 
 Prefer named ranges over `$B$6` in formulas. They self-document (`GrowthRate` beats `$B$6`) and they let you move the assumption cell without breaking formulas. Because `ref` values contain both `!` and `$`, add them through a batch heredoc:
